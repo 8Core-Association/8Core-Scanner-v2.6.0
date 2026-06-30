@@ -20,11 +20,21 @@ function action_class($status) {
     if ($status === 'quarantine_requested') return 'status-quarantine';
     if ($status === 'quarantined')          return 'status-quarantined';
     if ($status === 'delete_requested')     return 'status-delete';
+    if ($status === 'deleted')              return 'status-deleted';
     if ($status === 'checked')              return 'status-checked';
     if ($status === 'restore_requested')    return 'status-restore';
     if ($status === 'restored')             return 'status-restored';
+    if ($status === 'purge_requested')      return 'status-purge';
+    if ($status === 'purged')               return 'status-purged';
     if ($status === 'restore_failed')       return 'status-failed';
+    if ($status === 'quarantine_failed')    return 'status-failed';
+    if ($status === 'delete_failed')        return 'status-failed';
+    if ($status === 'purge_failed')         return 'status-failed';
     return 'status-new';
+}
+
+function is_failed_status($status): bool {
+    return in_array($status, ['quarantine_failed', 'delete_failed', 'restore_failed', 'purge_failed'], true);
 }
 
 function has_column(PDO $pdo, $table, $column) {

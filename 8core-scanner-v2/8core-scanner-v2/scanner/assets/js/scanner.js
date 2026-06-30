@@ -135,3 +135,28 @@ function submitBulk() {
   document.body.appendChild(form);
   form.submit();
 }
+
+function copySelectedIds() {
+  var checked = document.querySelectorAll('.row-chk:checked');
+  if (checked.length === 0) {
+    alert('Nijedan nalaz nije odabran.');
+    return;
+  }
+  var ids = Array.from(checked).map(function(chk) { return chk.value; });
+  var text = ids.join(', ');
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function() {
+      var btn = document.getElementById('btn-copy-ids');
+      if (btn) {
+        var orig = btn.innerHTML;
+        btn.textContent = 'Kopirano!';
+        setTimeout(function() { btn.innerHTML = orig; }, 1800);
+      }
+    }).catch(function() {
+      prompt('Kopiraj ID-eve:', text);
+    });
+  } else {
+    prompt('Kopiraj ID-eve:', text);
+  }
+}

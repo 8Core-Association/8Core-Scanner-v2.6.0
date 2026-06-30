@@ -23,15 +23,17 @@ try {
     $hasSourceGuess = has_column($pdo, 'findings', 'source_guess');
     $hasSourceType  = has_column($pdo, 'findings', 'source_type');
     $hasExt         = has_column($pdo, 'findings', 'file_ext');
+    $hasActionError = has_column($pdo, 'findings', 'action_error');
+    $hasQPath       = has_column($pdo, 'findings', 'quarantine_path');
 
     $accountCol  = $hasAccount  ? 'account_name' : 'owner_name';
     $relCol      = $hasRel      ? 'relative_path' : 'file_path';
     $detectedCol = $hasDetected ? 'detected_at'   : 'created_at';
 
-    $risk    = isset($_GET['risk'])    ? $_GET['risk']           : '';
-    $account = isset($_GET['account']) ? $_GET['account']        : '';
-    $status  = isset($_GET['status'])  ? $_GET['status']         : '';
-    $q       = isset($_GET['q'])       ? trim($_GET['q'])         : '';
+    $risk    = isset($_GET['risk'])    ? $_GET['risk']    : '';
+    $account = isset($_GET['account']) ? $_GET['account'] : '';
+    $status  = isset($_GET['status'])  ? $_GET['status']  : '';
+    $q       = isset($_GET['q'])       ? trim($_GET['q']) : '';
 
     $where  = [];
     $params = [];
@@ -60,17 +62,16 @@ try {
 
     $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
 
-    $statsStmt = $pdo->prepare("SELECT risk, COUNT(*) total FROM findings $whereSql GROUP BY risk");
-    $statsStmt->execute($params);
-    $stats = $statsStmt->fetchAll(PDO::FETCH_KEY_PAIR);
-
+    // ── Statistike po action_status ───────────────────────────────────────────
     $actionStats = [];
     if ($hasAction) {
         $as = $pdo->prepare("SELECT action_status, COUNT(*) total FROM findings $whereSql GROUP BY action_status");
         $as->execute($params);
         $actionStats = $as->fetchAll(PDO::FETCH_KEY_PAIR);
     }
+    $totalFindings = array_sum($actionStats) ?: 0;
 
+    // ── Account list + breakdown ──────────────────────────────────────────────
     if (is_admin()) {
         $accounts = $pdo->query("
             SELECT $accountCol AS account_name, COUNT(*) total
@@ -79,28 +80,52 @@ try {
             GROUP BY $accountCol
             ORDER BY total DESC
         ")->fetchAll();
+
+        $accountBreakdown = [];
+        if ($hasAction) {
+            $abRows = $pdo->query("
+                SELECT $accountCol AS account_name, action_status, COUNT(*) AS cnt
+                FROM findings
+                WHERE $accountCol IS NOT NULL AND $accountCol != ''
+                GROUP BY $accountCol, action_status
+            ")->fetchAll();
+            foreach ($abRows as $row) {
+                $acc = $row['account_name'];
+                $st  = $row['action_status'];
+                if (!isset($accountBreakdown[$acc])) {
+                    $accountBreakdown[$acc] = ['total' => 0, 'quarantine_requested' => 0, 'quarantined' => 0, 'failed' => 0];
+                }
+                $accountBreakdown[$acc]['total'] += (int)$row['cnt'];
+                if ($st === 'quarantine_requested')                                                      $accountBreakdown[$acc]['quarantine_requested'] += (int)$row['cnt'];
+                if ($st === 'quarantined')                                                               $accountBreakdown[$acc]['quarantined']          += (int)$row['cnt'];
+                if (in_array($st, ['quarantine_failed','delete_failed','restore_failed','purge_failed'], true)) $accountBreakdown[$acc]['failed'] += (int)$row['cnt'];
+            }
+        }
     } else {
         $accounts = [['account_name' => $user['account_name'], 'total' => 0]];
+        $accountBreakdown = [];
     }
 
+    // ── Nalazi ────────────────────────────────────────────────────────────────
     $stmt = $pdo->prepare("
         SELECT
             id, scan_id, rule_name, risk,
             $accountCol AS account_name,
             owner_name, group_name, perms, file_size,
             file_name,
-            " . ($hasExt ? "file_ext" : "'' AS file_ext") . ",
+            " . ($hasExt         ? "file_ext"        : "'' AS file_ext") . ",
             file_path,
             $relCol AS relative_path,
-            " . (has_column($pdo, 'findings', 'quarantine_path') ? "quarantine_path" : "'' AS quarantine_path") . ",
+            " . ($hasQPath       ? "quarantine_path" : "'' AS quarantine_path") . ",
             mtime,
-            " . ($hasCtime ? "ctime"       : "NULL AS ctime") . ",
-            " . ($hasBirth ? "birth_time"  : "NULL AS birth_time") . ",
+            " . ($hasCtime       ? "ctime"           : "NULL AS ctime") . ",
+            " . ($hasBirth       ? "birth_time"      : "NULL AS birth_time") . ",
             $detectedCol AS detected_at,
-            " . ($hasSourceGuess ? "source_guess" : "'' AS source_guess") . ",
-            " . ($hasSourceType  ? "source_type"  : "'' AS source_type") . ",
-            " . ($hasAction      ? "action_status" : "'new' AS action_status") . ",
-            " . ($hasAction      ? "action_note"   : "'' AS action_note") . ",
+            " . ($hasSourceGuess ? "source_guess"    : "'' AS source_guess") . ",
+            " . ($hasSourceType  ? "source_type"     : "'' AS source_type") . ",
+            " . ($hasAction      ? "action_status"   : "'new' AS action_status") . ",
+            " . ($hasAction      ? "action_note"     : "'' AS action_note") . ",
+            " . ($hasActionError ? "action_error"    : "'' AS action_error") . ",
             sha256,
             created_at
         FROM findings
@@ -113,6 +138,9 @@ try {
 
     $lastScan = $pdo->query("SELECT * FROM scans ORDER BY id DESC LIMIT 1")->fetch();
 
+    // Baza karantene za safe preview
+    $qbase = rtrim($config['quarantine_path'] ?? '/home/8core_quarantine', '/') . '/';
+
 } catch (Throwable $e) {
     http_response_code(500);
     echo '<!doctype html><html><head><meta charset="utf-8"><title>8Core Scanner greška</title></head><body>';
@@ -122,6 +150,62 @@ try {
     echo '</body></html>';
     exit;
 }
+
+// ── Inline preview fajla iz karantene (safe, read-only, 200 KB limit) ────────
+$preview   = null;
+$previewId = (int)($_GET['preview_id'] ?? 0);
+
+if ($previewId > 0) {
+    $pf = $pdo->prepare("
+        SELECT id, file_path, quarantine_path, account_name, sha256,
+               perms, owner_name, group_name, file_size, mtime, rule_name
+        FROM findings WHERE id = ? LIMIT 1
+    ");
+    $pf->execute([$previewId]);
+    $pf = $pf->fetch();
+
+    if ($pf && !empty($pf['quarantine_path'])) {
+        $qpath = $pf['quarantine_path'];
+        if (strpos($qpath, $qbase) !== 0) {
+            $preview = ['error' => 'Nesigurna putanja — preview odbijen.'];
+        } elseif (!file_exists($qpath)) {
+            $preview = ['error' => 'Fajl u karanteni nije pronađen na disku.'];
+        } else {
+            $rawSize  = filesize($qpath);
+            $maxRead  = 200 * 1024;
+            $raw      = file_get_contents($qpath, false, null, 0, $maxRead);
+            $isBinary = strpos(substr($raw, 0, 8192), "\0") !== false;
+            $sha256   = hash_file('sha256', $qpath);
+            $preview  = [
+                'id'         => $pf['id'],
+                'file_path'  => $pf['file_path'],
+                'qpath'      => $qpath,
+                'sha256'     => $sha256,
+                'sha256_det' => $pf['sha256'],
+                'size'       => $rawSize,
+                'perms'      => $pf['perms'],
+                'owner'      => $pf['owner_name'],
+                'group'      => $pf['group_name'],
+                'mtime'      => $pf['mtime'],
+                'rule'       => $pf['rule_name'],
+                'binary'     => $isBinary,
+                'truncated'  => ($rawSize > $maxRead),
+                'content'    => $isBinary ? null : $raw,
+            ];
+        }
+    } elseif ($pf) {
+        $preview = ['error' => 'Nalaz nije u karanteni — preview nije dostupan.'];
+    } else {
+        $preview = ['error' => 'Nalaz nije pronađen.'];
+    }
+}
+
+$backParams = http_build_query([
+    'risk'    => $risk,
+    'account' => is_admin() ? $account : '',
+    'status'  => $status,
+    'q'       => $q,
+]);
 ?>
 <!doctype html>
 <html lang="hr">
@@ -210,33 +294,78 @@ try {
       <div class="notice">Baza nema action stupce. Otvori <a href="install/migrate.php">migrate.php</a>.</div>
     <?php endif; ?>
 
-    <!-- STAT CARDS -->
-    <div class="cards">
-      <div class="card card-critical">
-        <div class="label">Critical</div>
-        <div class="num"><?= (int)($stats['CRITICAL'] ?? 0) ?></div>
+    <!-- WORKFLOW STAT KARTICE -->
+    <div class="cards dash-cards">
+      <div class="card card-total">
+        <div class="label">Ukupno nalaza</div>
+        <div class="num"><?= $totalFindings ?></div>
       </div>
-      <div class="card card-high">
-        <div class="label">High</div>
-        <div class="num"><?= (int)($stats['HIGH'] ?? 0) ?></div>
+      <div class="card card-new">
+        <div class="label">Novo / detected</div>
+        <div class="num"><?= (int)(($actionStats['new'] ?? 0) + ($actionStats['checked'] ?? 0)) ?></div>
       </div>
-      <div class="card card-medium">
-        <div class="label">Medium</div>
-        <div class="num"><?= (int)($stats['MEDIUM'] ?? 0) ?></div>
-      </div>
-      <div class="card card-action">
-        <div class="label">Ignored</div>
-        <div class="num"><?= (int)($actionStats['ignore'] ?? 0) ?></div>
-      </div>
-      <div class="card card-action">
-        <div class="label">Quarantine req.</div>
+      <div class="card card-qreq">
+        <div class="label">Za karantenu</div>
         <div class="num"><?= (int)($actionStats['quarantine_requested'] ?? 0) ?></div>
       </div>
-      <div class="card card-action">
-        <div class="label">Delete req.</div>
+      <div class="card card-qd">
+        <div class="label">U karanteni</div>
+        <div class="num"><?= (int)($actionStats['quarantined'] ?? 0) ?></div>
+      </div>
+      <div class="card card-failed">
+        <div class="label">Karantena failed</div>
+        <div class="num"><?= (int)($actionStats['quarantine_failed'] ?? 0) ?></div>
+      </div>
+      <div class="card card-dreq">
+        <div class="label">Za brisanje</div>
         <div class="num"><?= (int)($actionStats['delete_requested'] ?? 0) ?></div>
       </div>
+      <div class="card card-failed">
+        <div class="label">Delete failed</div>
+        <div class="num"><?= (int)($actionStats['delete_failed'] ?? 0) ?></div>
+      </div>
+      <div class="card card-failed">
+        <div class="label">Restore failed</div>
+        <div class="num"><?= (int)($actionStats['restore_failed'] ?? 0) ?></div>
+      </div>
     </div>
+
+    <?php if (is_admin() && !empty($accountBreakdown)): ?>
+    <!-- BREAKDOWN PO ACCOUNTU -->
+    <div class="account-breakdown">
+      <div class="ab-title">Pregled po accountu</div>
+      <div class="ab-table-wrap">
+        <table class="ab-table">
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Ukupno</th>
+              <th>Za karantenu</th>
+              <th>U karanteni</th>
+              <th>Failed</th>
+            </tr>
+          </thead>
+          <tbody>
+          <?php foreach ($accountBreakdown as $accName => $ab): ?>
+            <tr>
+              <td><a href="?account=<?= urlencode($accName) ?>" class="ab-account-link"><?= h($accName) ?></a></td>
+              <td class="ab-num"><?= (int)$ab['total'] ?></td>
+              <td class="ab-num"><?= $ab['quarantine_requested'] > 0 ? (int)$ab['quarantine_requested'] : '<span class="ab-zero">—</span>' ?></td>
+              <td class="ab-num"><?= $ab['quarantined'] > 0 ? (int)$ab['quarantined'] : '<span class="ab-zero">—</span>' ?></td>
+              <td class="ab-num">
+                <?php if ($ab['failed'] > 0): ?>
+                  <span class="ab-failed"><?= (int)$ab['failed'] ?></span>
+                <?php else: ?>
+                  <span class="ab-zero">—</span>
+                <?php endif; ?>
+              </td>
+            </tr>
+          <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <?php endif; ?>
 
     <!-- FILTERI -->
     <form class="filters" method="get">
@@ -261,12 +390,23 @@ try {
       <select name="status">
         <option value="">Svi statusi</option>
         <?php foreach ([
-            'new', 'checked', 'ignore',
-            'quarantine_requested', 'quarantined',
-            'delete_requested',
-            'restore_requested', 'restored', 'restore_failed',
-        ] as $s): ?>
-          <option value="<?= h($s) ?>" <?= $status === $s ? 'selected' : '' ?>><?= h($s) ?></option>
+            'new'               => 'Novo',
+            'checked'           => 'Pregledano',
+            'ignore'            => 'Ignorirano',
+            'quarantine_requested' => 'Za karantenu',
+            'quarantined'       => 'U karanteni',
+            'quarantine_failed' => 'Karantena neuspješna',
+            'delete_requested'  => 'Za brisanje',
+            'deleted'           => 'Obrisano',
+            'delete_failed'     => 'Brisanje neuspješno',
+            'restore_requested' => 'Za obnavljanje',
+            'restored'          => 'Obnovljeno',
+            'restore_failed'    => 'Obnavljanje neuspješno',
+            'purge_requested'   => 'Za trajno brisanje',
+            'purged'            => 'Trajno obrisano',
+            'purge_failed'      => 'Trajno brisanje neuspješno',
+        ] as $val => $label): ?>
+          <option value="<?= h($val) ?>" <?= $status === $val ? 'selected' : '' ?>><?= h($label) ?></option>
         <?php endforeach; ?>
       </select>
 
@@ -287,6 +427,10 @@ try {
         <option value="new">Reset na new</option>
       </select>
       <button type="button" class="btn btn-primary btn-sm" onclick="submitBulk()">Primijeni na odabrane</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="btn-copy-ids" onclick="copySelectedIds()" title="Kopiraj ID-eve u clipboard">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy IDs
+      </button>
       <button type="button" class="btn btn-ghost btn-sm" onclick="clearSelection()">Odznači sve</button>
     </div>
 
@@ -299,10 +443,11 @@ try {
               <input type="checkbox" id="chk-all" title="Odaberi sve" onclick="toggleAll(this)">
             </th>
             <th style="width:20px"></th>
+            <th class="col-id" style="width:54px">#</th>
             <th>Risk</th>
             <th>Status</th>
             <th>Account</th>
-            <th>File</th>
+            <th>File / Path</th>
             <th>Rule</th>
             <th>Source</th>
             <th>Akcije</th>
@@ -310,7 +455,7 @@ try {
         </thead>
         <tbody>
         <?php foreach ($findings as $f): ?>
-          <tr class="data-row" data-id="<?= (int)$f['id'] ?>">
+          <tr class="data-row<?= is_failed_status($f['action_status']) ? ' row-failed' : '' ?>" data-id="<?= (int)$f['id'] ?>">
             <td>
               <input type="checkbox" class="row-chk" name="ids[]" value="<?= (int)$f['id'] ?>"
                      onclick="event.stopPropagation(); updateBulkBar()">
@@ -320,19 +465,27 @@ try {
                 <svg viewBox="0 0 12 12"><line x1="6" y1="1" x2="6" y2="11"/><line x1="1" y1="6" x2="11" y2="6"/></svg>
               </span>
             </td>
+            <td onclick="toggleRow(<?= (int)$f['id'] ?>)" class="small mono" style="color:var(--text-muted)"><?= (int)$f['id'] ?></td>
             <td onclick="toggleRow(<?= (int)$f['id'] ?>)">
               <span class="badge <?= risk_class($f['risk']) ?>"><?= h($f['risk']) ?></span>
             </td>
             <td onclick="toggleRow(<?= (int)$f['id'] ?>)">
               <span class="status-pill <?= action_class($f['action_status']) ?>"><?= h($f['action_status']) ?></span>
+              <?php if (!empty($f['action_error'])): ?>
+                <span class="action-error-hint" title="<?= h($f['action_error']) ?>">
+                  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="#dc2626" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="7"/><line x1="8" y1="5" x2="8" y2="8"/><circle cx="8" cy="11" r="1" fill="#dc2626" stroke="none"/></svg>
+                </span>
+              <?php endif; ?>
             </td>
             <td onclick="toggleRow(<?= (int)$f['id'] ?>)">
               <?= h($f['account_name']) ?>
               <div class="small">owner: <?= h($f['owner_name']) ?></div>
             </td>
             <td onclick="toggleRow(<?= (int)$f['id'] ?>)">
-              <b><?= h($f['file_name']) ?></b>
-              <?php if ($f['file_ext']): ?><div class="small">.<?= h($f['file_ext']) ?></div><?php endif; ?>
+              <b><?= h($f['file_name']) ?></b><?php if ($f['file_ext']): ?><span class="small" style="margin-left:2px;">.<?= h($f['file_ext']) ?></span><?php endif; ?>
+              <div class="small mono path-truncate" title="<?= h($f['file_path']) ?>">
+                <?= h($f['relative_path'] ?: $f['file_path']) ?>
+              </div>
             </td>
             <td onclick="toggleRow(<?= (int)$f['id'] ?>)"><?= h($f['rule_name']) ?></td>
             <td onclick="toggleRow(<?= (int)$f['id'] ?>)">
@@ -348,10 +501,10 @@ try {
                 </button>
                 <div class="action-menu">
                   <?php foreach ([
-                    'checked'              => ['Checked',    'act-checked'],
-                    'ignore'               => ['Ignore',     'act-ignore'],
-                    'quarantine_requested' => ['Quarantine', 'act-quarantine'],
-                    'delete_requested'     => ['Delete',     'act-delete'],
+                    'checked'              => ['Checked',   'act-checked'],
+                    'ignore'               => ['Ignore',    'act-ignore'],
+                    'quarantine_requested' => ['Karantena', 'act-quarantine'],
+                    'delete_requested'     => ['Delete',    'act-delete'],
                   ] as $act => $meta): ?>
                   <form method="post" action="action.php">
                     <?= csrf_field() ?>
@@ -371,6 +524,11 @@ try {
                       <span class="dot"></span>Vrati iz karantene
                     </button>
                   </form>
+                  <a href="?preview_id=<?= (int)$f['id'] ?>&<?= h($backParams) ?>"
+                     class="action-menu-item" style="text-decoration:none;color:var(--text);"
+                     onclick="event.stopPropagation()">
+                    <span class="dot" style="background:#64748b"></span>Preview sadržaja
+                  </a>
                   <?php endif; ?>
                 </div>
               </div>
@@ -378,8 +536,12 @@ try {
           </tr>
           <!-- DETALJI -->
           <tr class="detail-row hidden" id="detail-<?= (int)$f['id'] ?>">
-            <td colspan="9">
+            <td colspan="10">
               <div class="detail-panel">
+                <div class="detail-item">
+                  <span class="detail-label">ID nalaza</span>
+                  <span class="detail-value mono">#<?= (int)$f['id'] ?></span>
+                </div>
                 <div class="detail-item">
                   <span class="detail-label">Full path</span>
                   <span class="detail-value mono"><?= h($f['file_path']) ?></span>
@@ -387,6 +549,18 @@ try {
                 <div class="detail-item">
                   <span class="detail-label">Relative path</span>
                   <span class="detail-value mono"><?= h($f['relative_path']) ?></span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">Owner / Group</span>
+                  <span class="detail-value mono"><?= h($f['owner_name']) ?> / <?= h($f['group_name']) ?></span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">Dozvole</span>
+                  <span class="detail-value mono"><?= h($f['perms']) ?></span>
+                </div>
+                <div class="detail-item">
+                  <span class="detail-label">Veličina</span>
+                  <span class="detail-value"><?= number_format((int)$f['file_size']) ?> B</span>
                 </div>
                 <div class="detail-item">
                   <span class="detail-label">mtime</span>
@@ -404,18 +578,6 @@ try {
                   <span class="detail-label">detected_at</span>
                   <span class="detail-value"><?= h($f['detected_at']) ?></span>
                 </div>
-                <div class="detail-item">
-                  <span class="detail-label">Dozvole</span>
-                  <span class="detail-value mono"><?= h($f['perms']) ?></span>
-                </div>
-                <div class="detail-item">
-                  <span class="detail-label">Veličina</span>
-                  <span class="detail-value"><?= number_format((int)$f['file_size']) ?> B</span>
-                </div>
-                <div class="detail-item">
-                  <span class="detail-label">Grupa</span>
-                  <span class="detail-value"><?= h($f['group_name']) ?></span>
-                </div>
                 <?php if ($f['sha256']): ?>
                 <div class="detail-item" style="grid-column:1/-1">
                   <span class="detail-label">SHA-256</span>
@@ -428,14 +590,21 @@ try {
                   <span class="detail-value"><?= h($f['action_note']) ?></span>
                 </div>
                 <?php endif; ?>
+                <?php if (!empty($f['action_error'])): ?>
+                <div class="detail-item" style="grid-column:1/-1">
+                  <span class="detail-label">Action error</span>
+                  <span class="detail-value detail-error"><?= h($f['action_error']) ?></span>
+                </div>
+                <?php endif; ?>
                 <?php if (is_admin() && ($f['action_status'] === 'quarantined') && !empty($f['quarantine_path'])): ?>
                 <div class="detail-item" style="grid-column:1/-1">
                   <span class="detail-label">Karantena</span>
                   <span class="detail-value">
-                    <a href="admin/quarantine.php?status=quarantined&preview_id=<?= (int)$f['id'] ?>"
-                       style="font-size:12px;">
-                      Otvori u karanteni
-                    </a>
+                    <span class="mono small"><?= h($f['quarantine_path']) ?></span>
+                    &nbsp;
+                    <a href="?preview_id=<?= (int)$f['id'] ?>&<?= h($backParams) ?>" style="font-size:12px;">Preview sadržaja</a>
+                    &nbsp;&middot;&nbsp;
+                    <a href="admin/quarantine.php?status=quarantined&preview_id=<?= (int)$f['id'] ?>" style="font-size:12px;">Otvori u karanteni</a>
                   </span>
                 </div>
                 <?php endif; ?>
@@ -450,6 +619,60 @@ try {
   </div><!-- .content -->
 </div><!-- .main -->
 </div><!-- .layout -->
+
+<?php if ($preview !== null): ?>
+<!-- PREVIEW OVERLAY -->
+<?php $closeUrl = 'index.php?' . h($backParams); ?>
+<div class="finding-preview-overlay"
+     onclick="if(event.target===this)window.location='<?= $closeUrl ?>'">
+  <div class="finding-preview-box">
+    <div class="finding-preview-header">
+      <div class="finding-preview-title">Preview fajla &middot; ID <?= $previewId ?></div>
+      <a href="<?= $closeUrl ?>" class="btn btn-ghost btn-sm">Zatvori &times;</a>
+    </div>
+
+    <?php if (isset($preview['error'])): ?>
+      <div class="notice error"><?= h($preview['error']) ?></div>
+    <?php else: ?>
+      <div class="finding-preview-meta">
+        <span><b>Original:</b> <?= h($preview['file_path']) ?></span>
+        <span><b>Karantena:</b> <?= h($preview['qpath']) ?></span>
+        <span><b>Veličina:</b> <?= number_format($preview['size']) ?> B<?= $preview['truncated'] ? ' (prikazano prvih 200 KB)' : '' ?></span>
+        <span><b>Owner:</b> <?= h($preview['owner']) ?> / <?= h($preview['group']) ?></span>
+        <span><b>Dozvole:</b> <?= h($preview['perms']) ?></span>
+        <span><b>mtime:</b> <?= h($preview['mtime']) ?></span>
+        <span><b>Pravilo:</b> <?= h($preview['rule']) ?></span>
+      </div>
+      <div class="finding-preview-meta" style="margin-top:6px;">
+        <span style="width:100%;"><b>SHA-256 (karantena):</b>
+          <span class="finding-sha"><?= h($preview['sha256']) ?></span>
+        </span>
+        <?php if ($preview['sha256_det']): ?>
+        <span style="width:100%;"><b>SHA-256 (detekcija):</b>
+          <span class="finding-sha<?= ($preview['sha256'] !== $preview['sha256_det']) ? ' sha-mismatch' : '' ?>">
+            <?= h($preview['sha256_det']) ?>
+            <?php if ($preview['sha256'] !== $preview['sha256_det']): ?>
+              <span class="sha-warn">RAZLIKA!</span>
+            <?php endif; ?>
+          </span>
+        </span>
+        <?php endif; ?>
+      </div>
+      <?php if ($preview['binary']): ?>
+        <div class="finding-preview-binary">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
+               stroke-width="2" style="vertical-align:-5px;margin-right:6px;">
+            <circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+          </svg>
+          Binary fajl — tekstualni preview nije dostupan
+        </div>
+      <?php else: ?>
+        <pre class="finding-preview-code"><?= h($preview['content']) ?></pre>
+      <?php endif; ?>
+    <?php endif; ?>
+  </div>
+</div>
+<?php endif; ?>
 
 <script src="assets/js/scanner.js"></script>
 </body>

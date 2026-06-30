@@ -1181,3 +1181,262 @@ thead .row-chk,
 
 tbody tr.row-selected > td { background: #eff6ff; }
 
+/* ── NOVI STATUS PILLOVI ─────────────────────────────────────────────────── */
+.status-deleted  { background: #f8fafc; color: #64748b; border: 1px solid #e2e8f0; }
+.status-purge    { background: #fdf4ff; color: #7e22ce; border: 1px solid #e9d5ff; }
+.status-purged   { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+
+/* ── FAILED ROW HIGHLIGHT ───────────────────────────────────────────────── */
+tr.row-failed > td {
+  background: #fff5f5 !important;
+}
+tr.row-failed:hover > td {
+  background: #fee2e2 !important;
+}
+tr.row-failed .status-pill {
+  font-weight: 700;
+  box-shadow: 0 0 0 1px #fca5a5;
+}
+
+/* ── ACTION ERROR HINT ICON ─────────────────────────────────────────────── */
+.action-error-hint {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  vertical-align: middle;
+  cursor: help;
+}
+
+/* ── DETAIL ERROR ───────────────────────────────────────────────────────── */
+.detail-error {
+  color: #b91c1c;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 5px;
+  padding: 4px 8px;
+}
+
+/* ── PATH TRUNCATE ───────────────────────────────────────────────────────── */
+.path-truncate {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+/* ── DASH CARDS — workflow kartice ──────────────────────────────────────── */
+.dash-cards {
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+}
+
+.card.card-total::before   { background: #64748b; }
+.card.card-new::before     { background: #2563eb; }
+.card.card-qreq::before    { background: #d97706; }
+.card.card-qd::before      { background: #92400e; }
+.card.card-dreq::before    { background: #dc2626; }
+.card.card-failed::before  { background: #9f1239; }
+
+.card.card-total .num  { color: #334155; }
+.card.card-new .num    { color: #2563eb; }
+.card.card-qreq .num   { color: #d97706; }
+.card.card-qd .num     { color: #92400e; }
+.card.card-dreq .num   { color: #dc2626; }
+
+/* Failed kartice — jači vizualni naglasak */
+.card.card-failed {
+  background: #fff1f2;
+  border-color: #fda4af;
+}
+.card.card-failed .label { color: #9f1239; }
+.card.card-failed .num   { color: #9f1239; font-size: 32px; }
+/* Skrij failed kartice kad su 0 — ostavljamo vidljive, samo jako bledne */
+.card.card-failed[data-zero="1"] {
+  opacity: .45;
+}
+
+/* ── ACCOUNT BREAKDOWN ───────────────────────────────────────────────────── */
+.account-breakdown {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+
+.ab-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-muted);
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+
+.ab-table-wrap {
+  overflow-x: auto;
+}
+
+.ab-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ab-table thead th {
+  background: var(--surface2);
+  padding: 7px 12px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.ab-table thead th:not(:first-child) { text-align: right; }
+
+.ab-table tbody tr {
+  border-bottom: 1px solid var(--border);
+  transition: background .1s;
+}
+
+.ab-table tbody tr:last-child { border-bottom: none; }
+.ab-table tbody tr:hover > td { background: #f8fafc; }
+
+.ab-table tbody td {
+  padding: 7px 12px;
+  font-size: 12.5px;
+  color: var(--text);
+  vertical-align: middle;
+}
+
+.ab-table tbody td:not(:first-child) { text-align: right; }
+
+.ab-num { font-variant-numeric: tabular-nums; }
+
+.ab-account-link {
+  font-weight: 500;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 12.5px;
+}
+.ab-account-link:hover { text-decoration: underline; }
+
+.ab-zero { color: #cbd5e1; font-size: 12px; }
+
+.ab-failed {
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* ── FINDING PREVIEW OVERLAY ─────────────────────────────────────────────── */
+.finding-preview-overlay {
+  position: fixed; inset: 0;
+  background: rgba(15,23,42,.72);
+  z-index: 900;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 20px;
+  overflow-y: auto;
+}
+
+.finding-preview-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  width: 100%;
+  max-width: 900px;
+  padding: 24px;
+}
+
+.finding-preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 16px;
+  gap: 16px;
+}
+
+.finding-preview-title {
+  font-size: 14px;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.finding-preview-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.finding-preview-meta span {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 8px;
+}
+
+.finding-preview-code {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 7px;
+  padding: 14px 16px;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  max-height: 480px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.finding-preview-binary {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  background: var(--surface2);
+  border-radius: 7px;
+  border: 1px dashed var(--border);
+}
+
+.finding-sha {
+  font-family: monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.sha-mismatch {
+  color: #b91c1c;
+}
+
+.sha-warn {
+  display: inline-block;
+  background: #dc2626;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+  letter-spacing: .04em;
+}
+
