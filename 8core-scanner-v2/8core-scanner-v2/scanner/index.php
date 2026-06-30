@@ -11,6 +11,15 @@ require __DIR__ . '/includes/auth.php';
 require __DIR__ . '/includes/helpers.php';
 require_login();
 
+// Defaulti koji su uvijek definirani, čak i ako try padne
+$findings        = array();
+$actionStats     = array();
+$accountBreakdown = array();
+$accounts        = array();
+$totalFindings   = 0;
+$lastScan        = null;
+$qbase           = '/home/8core_quarantine/';
+
 try {
     $user = current_user();
 
@@ -35,8 +44,8 @@ try {
     $status  = isset($_GET['status'])  ? $_GET['status']  : '';
     $q       = isset($_GET['q'])       ? trim($_GET['q']) : '';
 
-    $where  = [];
-    $params = [];
+    $where  = array();
+    $params = array();
 
     if (!is_admin()) {
         $accounts = user_accounts();
@@ -63,13 +72,12 @@ try {
     $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
 
     // ── Statistike po action_status ───────────────────────────────────────────
-    $actionStats = [];
     if ($hasAction) {
         $as = $pdo->prepare("SELECT action_status, COUNT(*) total FROM findings $whereSql GROUP BY action_status");
         $as->execute($params);
         $actionStats = $as->fetchAll(PDO::FETCH_KEY_PAIR);
     }
-    $totalFindings = array_sum($actionStats) ?: 0;
+    $totalFindings = (int)array_sum($actionStats);
 
     // ── Account list + breakdown ──────────────────────────────────────────────
     if (is_admin()) {
@@ -81,7 +89,7 @@ try {
             ORDER BY total DESC
         ")->fetchAll();
 
-        $accountBreakdown = [];
+        $accountBreakdown = array();
         if ($hasAction) {
             $abRows = $pdo->query("
                 SELECT $accountCol AS account_name, action_status, COUNT(*) AS cnt
@@ -93,17 +101,19 @@ try {
                 $acc = $row['account_name'];
                 $st  = $row['action_status'];
                 if (!isset($accountBreakdown[$acc])) {
-                    $accountBreakdown[$acc] = ['total' => 0, 'quarantine_requested' => 0, 'quarantined' => 0, 'failed' => 0];
+                    $accountBreakdown[$acc] = array('total' => 0, 'quarantine_requested' => 0, 'quarantined' => 0, 'failed' => 0);
                 }
                 $accountBreakdown[$acc]['total'] += (int)$row['cnt'];
-                if ($st === 'quarantine_requested')                                                      $accountBreakdown[$acc]['quarantine_requested'] += (int)$row['cnt'];
-                if ($st === 'quarantined')                                                               $accountBreakdown[$acc]['quarantined']          += (int)$row['cnt'];
-                if (in_array($st, ['quarantine_failed','delete_failed','restore_failed','purge_failed'], true)) $accountBreakdown[$acc]['failed'] += (int)$row['cnt'];
+                if ($st === 'quarantine_requested') $accountBreakdown[$acc]['quarantine_requested'] += (int)$row['cnt'];
+                if ($st === 'quarantined')          $accountBreakdown[$acc]['quarantined']          += (int)$row['cnt'];
+                if (in_array($st, array('quarantine_failed','delete_failed','restore_failed','purge_failed'), true)) {
+                    $accountBreakdown[$acc]['failed'] += (int)$row['cnt'];
+                }
             }
         }
     } else {
-        $accounts = [['account_name' => $user['account_name'], 'total' => 0]];
-        $accountBreakdown = [];
+        $accounts = array(array('account_name' => $user['account_name'], 'total' => 0));
+        $accountBreakdown = array();
     }
 
     // ── Nalazi ────────────────────────────────────────────────────────────────
@@ -139,7 +149,9 @@ try {
     $lastScan = $pdo->query("SELECT * FROM scans ORDER BY id DESC LIMIT 1")->fetch();
 
     // Baza karantene za safe preview
-    $qbase = rtrim($config['quarantine_path'] ?? '/home/8core_quarantine', '/') . '/';
+    if (isset($config['quarantine_path']) && $config['quarantine_path'] !== '') {
+        $qbase = rtrim($config['quarantine_path'], '/') . '/';
+    }
 
 } catch (Throwable $e) {
     http_response_code(500);
@@ -152,60 +164,65 @@ try {
 }
 
 // ── Inline preview fajla iz karantene (safe, read-only, 200 KB limit) ────────
+// Samo za admina; quarantine_path kolona mora postojati ($hasQPath)
 $preview   = null;
-$previewId = (int)($_GET['preview_id'] ?? 0);
+$previewId = isset($_GET['preview_id']) ? (int)$_GET['preview_id'] : 0;
 
-if ($previewId > 0) {
-    $pf = $pdo->prepare("
-        SELECT id, file_path, quarantine_path, account_name, sha256,
-               perms, owner_name, group_name, file_size, mtime, rule_name
-        FROM findings WHERE id = ? LIMIT 1
-    ");
-    $pf->execute([$previewId]);
-    $pf = $pf->fetch();
+if ($previewId > 0 && is_admin() && $hasQPath) {
+    try {
+        $pfStmt = $pdo->prepare("
+            SELECT id, file_path, quarantine_path, account_name, sha256,
+                   perms, owner_name, group_name, file_size, mtime, rule_name
+            FROM findings WHERE id = ? LIMIT 1
+        ");
+        $pfStmt->execute(array($previewId));
+        $pf = $pfStmt->fetch();
 
-    if ($pf && !empty($pf['quarantine_path'])) {
-        $qpath = $pf['quarantine_path'];
-        if (strpos($qpath, $qbase) !== 0) {
-            $preview = ['error' => 'Nesigurna putanja — preview odbijen.'];
-        } elseif (!file_exists($qpath)) {
-            $preview = ['error' => 'Fajl u karanteni nije pronađen na disku.'];
+        if ($pf && !empty($pf['quarantine_path'])) {
+            $qpath = $pf['quarantine_path'];
+            if (strpos($qpath, $qbase) !== 0) {
+                $preview = array('error' => 'Nesigurna putanja — preview odbijen.');
+            } elseif (!file_exists($qpath)) {
+                $preview = array('error' => 'Fajl u karanteni nije pronađen na disku.');
+            } else {
+                $rawSize  = filesize($qpath);
+                $maxRead  = 200 * 1024;
+                $raw      = file_get_contents($qpath, false, null, 0, $maxRead);
+                $isBinary = strpos(substr($raw, 0, 8192), "\0") !== false;
+                $sha256   = hash_file('sha256', $qpath);
+                $preview  = array(
+                    'id'         => $pf['id'],
+                    'file_path'  => $pf['file_path'],
+                    'qpath'      => $qpath,
+                    'sha256'     => $sha256,
+                    'sha256_det' => $pf['sha256'],
+                    'size'       => $rawSize,
+                    'perms'      => $pf['perms'],
+                    'owner'      => $pf['owner_name'],
+                    'group'      => $pf['group_name'],
+                    'mtime'      => $pf['mtime'],
+                    'rule'       => $pf['rule_name'],
+                    'binary'     => $isBinary,
+                    'truncated'  => ($rawSize > $maxRead),
+                    'content'    => $isBinary ? null : $raw,
+                );
+            }
+        } elseif ($pf) {
+            $preview = array('error' => 'Nalaz nije u karanteni — preview nije dostupan.');
         } else {
-            $rawSize  = filesize($qpath);
-            $maxRead  = 200 * 1024;
-            $raw      = file_get_contents($qpath, false, null, 0, $maxRead);
-            $isBinary = strpos(substr($raw, 0, 8192), "\0") !== false;
-            $sha256   = hash_file('sha256', $qpath);
-            $preview  = [
-                'id'         => $pf['id'],
-                'file_path'  => $pf['file_path'],
-                'qpath'      => $qpath,
-                'sha256'     => $sha256,
-                'sha256_det' => $pf['sha256'],
-                'size'       => $rawSize,
-                'perms'      => $pf['perms'],
-                'owner'      => $pf['owner_name'],
-                'group'      => $pf['group_name'],
-                'mtime'      => $pf['mtime'],
-                'rule'       => $pf['rule_name'],
-                'binary'     => $isBinary,
-                'truncated'  => ($rawSize > $maxRead),
-                'content'    => $isBinary ? null : $raw,
-            ];
+            $preview = array('error' => 'Nalaz nije pronađen.');
         }
-    } elseif ($pf) {
-        $preview = ['error' => 'Nalaz nije u karanteni — preview nije dostupan.'];
-    } else {
-        $preview = ['error' => 'Nalaz nije pronađen.'];
+    } catch (Throwable $previewEx) {
+        $preview = array('error' => 'Greška pri učitavanju previewa: ' . $previewEx->getMessage());
     }
 }
 
-$backParams = http_build_query([
+$backParams = http_build_query(array(
     'risk'    => $risk,
     'account' => is_admin() ? $account : '',
     'status'  => $status,
     'q'       => $q,
-]);
+));
 ?>
 <!doctype html>
 <html lang="hr">
@@ -350,13 +367,13 @@ $backParams = http_build_query([
             <tr>
               <td><a href="?account=<?= urlencode($accName) ?>" class="ab-account-link"><?= h($accName) ?></a></td>
               <td class="ab-num"><?= (int)$ab['total'] ?></td>
-              <td class="ab-num"><?= $ab['quarantine_requested'] > 0 ? (int)$ab['quarantine_requested'] : '<span class="ab-zero">—</span>' ?></td>
-              <td class="ab-num"><?= $ab['quarantined'] > 0 ? (int)$ab['quarantined'] : '<span class="ab-zero">—</span>' ?></td>
+              <td class="ab-num"><?php echo $ab['quarantine_requested'] > 0 ? (int)$ab['quarantine_requested'] : '<span class="ab-zero">&mdash;</span>'; ?></td>
+              <td class="ab-num"><?php echo $ab['quarantined'] > 0 ? (int)$ab['quarantined'] : '<span class="ab-zero">&mdash;</span>'; ?></td>
               <td class="ab-num">
                 <?php if ($ab['failed'] > 0): ?>
                   <span class="ab-failed"><?= (int)$ab['failed'] ?></span>
                 <?php else: ?>
-                  <span class="ab-zero">—</span>
+                  <span class="ab-zero">&mdash;</span>
                 <?php endif; ?>
               </td>
             </tr>
@@ -371,7 +388,7 @@ $backParams = http_build_query([
     <form class="filters" method="get">
       <select name="risk">
         <option value="">Svi rizici</option>
-        <?php foreach (['CRITICAL','HIGH','MEDIUM','LOW'] as $r): ?>
+        <?php foreach (array('CRITICAL','HIGH','MEDIUM','LOW') as $r): ?>
           <option value="<?= h($r) ?>" <?= $risk === $r ? 'selected' : '' ?>><?= h($r) ?></option>
         <?php endforeach; ?>
       </select>
@@ -389,23 +406,26 @@ $backParams = http_build_query([
 
       <select name="status">
         <option value="">Svi statusi</option>
-        <?php foreach ([
-            'new'               => 'Novo',
-            'checked'           => 'Pregledano',
-            'ignore'            => 'Ignorirano',
+        <?php
+        $statusLabels = array(
+            'new'                  => 'Novo',
+            'checked'              => 'Pregledano',
+            'ignore'               => 'Ignorirano',
             'quarantine_requested' => 'Za karantenu',
-            'quarantined'       => 'U karanteni',
-            'quarantine_failed' => 'Karantena neuspješna',
-            'delete_requested'  => 'Za brisanje',
-            'deleted'           => 'Obrisano',
-            'delete_failed'     => 'Brisanje neuspješno',
-            'restore_requested' => 'Za obnavljanje',
-            'restored'          => 'Obnovljeno',
-            'restore_failed'    => 'Obnavljanje neuspješno',
-            'purge_requested'   => 'Za trajno brisanje',
-            'purged'            => 'Trajno obrisano',
-            'purge_failed'      => 'Trajno brisanje neuspješno',
-        ] as $val => $label): ?>
+            'quarantined'          => 'U karanteni',
+            'quarantine_failed'    => 'Karantena neuspješna',
+            'delete_requested'     => 'Za brisanje',
+            'deleted'              => 'Obrisano',
+            'delete_failed'        => 'Brisanje neuspješno',
+            'restore_requested'    => 'Za obnavljanje',
+            'restored'             => 'Obnovljeno',
+            'restore_failed'       => 'Obnavljanje neuspješno',
+            'purge_requested'      => 'Za trajno brisanje',
+            'purged'               => 'Trajno obrisano',
+            'purge_failed'         => 'Trajno brisanje neuspješno',
+        );
+        foreach ($statusLabels as $val => $label):
+        ?>
           <option value="<?= h($val) ?>" <?= $status === $val ? 'selected' : '' ?>><?= h($label) ?></option>
         <?php endforeach; ?>
       </select>
@@ -455,7 +475,8 @@ $backParams = http_build_query([
         </thead>
         <tbody>
         <?php foreach ($findings as $f): ?>
-          <tr class="data-row<?= is_failed_status($f['action_status']) ? ' row-failed' : '' ?>" data-id="<?= (int)$f['id'] ?>">
+          <?php $isFailed = is_failed_status($f['action_status']); ?>
+          <tr class="data-row<?= $isFailed ? ' row-failed' : '' ?>" data-id="<?= (int)$f['id'] ?>">
             <td>
               <input type="checkbox" class="row-chk" name="ids[]" value="<?= (int)$f['id'] ?>"
                      onclick="event.stopPropagation(); updateBulkBar()">
@@ -484,7 +505,7 @@ $backParams = http_build_query([
             <td onclick="toggleRow(<?= (int)$f['id'] ?>)">
               <b><?= h($f['file_name']) ?></b><?php if ($f['file_ext']): ?><span class="small" style="margin-left:2px;">.<?= h($f['file_ext']) ?></span><?php endif; ?>
               <div class="small mono path-truncate" title="<?= h($f['file_path']) ?>">
-                <?= h($f['relative_path'] ?: $f['file_path']) ?>
+                <?= h($f['relative_path'] ? $f['relative_path'] : $f['file_path']) ?>
               </div>
             </td>
             <td onclick="toggleRow(<?= (int)$f['id'] ?>)"><?= h($f['rule_name']) ?></td>
@@ -500,12 +521,12 @@ $backParams = http_build_query([
                   <svg class="chevron" viewBox="0 0 12 12"><polyline points="2,4 6,8 10,4"/></svg>
                 </button>
                 <div class="action-menu">
-                  <?php foreach ([
-                    'checked'              => ['Checked',   'act-checked'],
-                    'ignore'               => ['Ignore',    'act-ignore'],
-                    'quarantine_requested' => ['Karantena', 'act-quarantine'],
-                    'delete_requested'     => ['Delete',    'act-delete'],
-                  ] as $act => $meta): ?>
+                  <?php foreach (array(
+                    'checked'              => array('Checked',   'act-checked'),
+                    'ignore'               => array('Ignore',    'act-ignore'),
+                    'quarantine_requested' => array('Karantena', 'act-quarantine'),
+                    'delete_requested'     => array('Delete',    'act-delete'),
+                  ) as $act => $meta): ?>
                   <form method="post" action="action.php">
                     <?= csrf_field() ?>
                     <input type="hidden" name="id"     value="<?= (int)$f['id'] ?>">
@@ -515,7 +536,7 @@ $backParams = http_build_query([
                     </button>
                   </form>
                   <?php endforeach; ?>
-                  <?php if (($f['action_status'] ?? '') === 'quarantined' && !empty($f['quarantine_path'])): ?>
+                  <?php if ($f['action_status'] === 'quarantined' && !empty($f['quarantine_path'])): ?>
                   <form method="post" action="action.php">
                     <?= csrf_field() ?>
                     <input type="hidden" name="id"     value="<?= (int)$f['id'] ?>">
@@ -524,11 +545,13 @@ $backParams = http_build_query([
                       <span class="dot"></span>Vrati iz karantene
                     </button>
                   </form>
+                  <?php if (is_admin()): ?>
                   <a href="?preview_id=<?= (int)$f['id'] ?>&<?= h($backParams) ?>"
                      class="action-menu-item" style="text-decoration:none;color:var(--text);"
                      onclick="event.stopPropagation()">
                     <span class="dot" style="background:#64748b"></span>Preview sadržaja
                   </a>
+                  <?php endif; ?>
                   <?php endif; ?>
                 </div>
               </div>
@@ -596,7 +619,7 @@ $backParams = http_build_query([
                   <span class="detail-value detail-error"><?= h($f['action_error']) ?></span>
                 </div>
                 <?php endif; ?>
-                <?php if (is_admin() && ($f['action_status'] === 'quarantined') && !empty($f['quarantine_path'])): ?>
+                <?php if (is_admin() && $f['action_status'] === 'quarantined' && !empty($f['quarantine_path'])): ?>
                 <div class="detail-item" style="grid-column:1/-1">
                   <span class="detail-label">Karantena</span>
                   <span class="detail-value">
@@ -647,7 +670,7 @@ $backParams = http_build_query([
         <span style="width:100%;"><b>SHA-256 (karantena):</b>
           <span class="finding-sha"><?= h($preview['sha256']) ?></span>
         </span>
-        <?php if ($preview['sha256_det']): ?>
+        <?php if (!empty($preview['sha256_det'])): ?>
         <span style="width:100%;"><b>SHA-256 (detekcija):</b>
           <span class="finding-sha<?= ($preview['sha256'] !== $preview['sha256_det']) ? ' sha-mismatch' : '' ?>">
             <?= h($preview['sha256_det']) ?>

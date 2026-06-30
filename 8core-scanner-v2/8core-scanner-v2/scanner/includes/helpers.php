@@ -33,8 +33,8 @@ function action_class($status) {
     return 'status-new';
 }
 
-function is_failed_status($status): bool {
-    return in_array($status, ['quarantine_failed', 'delete_failed', 'restore_failed', 'purge_failed'], true);
+function is_failed_status($status) {
+    return in_array($status, array('quarantine_failed', 'delete_failed', 'restore_failed', 'purge_failed'), true);
 }
 
 function has_column(PDO $pdo, $table, $column) {
@@ -91,7 +91,7 @@ function csrf_verify(): void {
         return;
     }
 
-    $submitted = $_POST['csrf_token'] ?? '';
+    $submitted = isset($_POST['csrf_token']) ? $_POST['csrf_token'] : '';
 
     if (!hash_equals(csrf_token(), $submitted)) {
         http_response_code(403);
