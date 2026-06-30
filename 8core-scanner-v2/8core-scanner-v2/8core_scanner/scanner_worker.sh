@@ -314,7 +314,9 @@ process_file_actions() {
       mkdir -p "$qdir"
       set_quarantine_perms "$qdir" dir
 
-      if mv -- "$file" "$qpath"; then
+      local mv_err
+      mv_err=$(mv -- "$file" "$qpath" 2>&1)
+      if [ $? -eq 0 ]; then
         set_quarantine_perms "$qpath" file
         mysql_run "
           UPDATE findings
@@ -329,11 +331,11 @@ process_file_actions() {
         mysql_run "
           UPDATE findings
           SET action_status='quarantine_failed',
-              action_error='mv neuspješan',
+              action_error='mv failed: $(sql_escape "$mv_err")',
               action_at=NOW()
           WHERE id=$id;
         "
-        log "Karantena neuspješna ID=$id FILE=$file"
+        log "Karantena neuspješna ID=$id FILE=$file ERR=$mv_err"
       fi
     fi
 
