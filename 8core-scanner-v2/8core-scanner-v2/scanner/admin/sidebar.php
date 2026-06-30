@@ -18,7 +18,7 @@ function sb_active($file) {
       </div>
       <span class="logo-text">8Core Scanner</span>
     </div>
-    <div class="logo-version">Admin Panel v2.5.3</div>
+    <div class="logo-version">Admin Panel v2.6.0</div>
   </div>
 
   <nav class="sidebar-nav">

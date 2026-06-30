@@ -6,6 +6,55 @@ Verzioniranje slijedi [Semantic Versioning](https://semver.org/lang/hr/).
 
 ---
 
+## [2.6.0] — 2026-06-30
+
+### Added
+
+- **Admin alat "Očisti rezultate"** (`admin/clear_results.php`):
+  - Nova admin stranica u sekciji "Podaci" u sidebaru
+  - Sekcija 1: čišćenje nalaza po accountu (dropdown, confirmation `OBRISI <account>`)
+  - Sekcija 2: čišćenje svih rezultata (confirmation `OBRISI SVE`)
+  - Prikaz zadnjih 15 maintenance requestova s punim audit logom (scope, account, status, arhiva, brojevi obrisanih zapisa, greška, datumi)
+  - JS validacija potvrde na klijentu + server-side CSRF + confirmation provjera
+
+- **POST handler** (`admin/clear_results_action.php`):
+  - Prihvaća samo POST, CSRF zaštita obavezna
+  - Validacija account_name (ne smije sadržavati `/`, `..` niti whitespace; mora postojati u bazi)
+  - Kreira `scanner_maintenance_requests` zapis sa `status='queued'`; ne radi destruktivne operacije direktno
+
+- **Maintenance helper** (`includes/maintenance.php`):
+  - `maintenance_create()` — kreira queued request
+  - `maintenance_recent()` — lista zadnjih N requestova za UI
+  - `maintenance_accounts()` — dohvaća accounte iz `findings` za dropdown
+  - `maintenance_table_exists()` — graceful fallback ako tablica nije kreirana
+
+- **Migration** (`install/migrations/20260630_003_add_maintenance_requests.sql`):
+  - Nova tablica `scanner_maintenance_requests` s audit logom (scope, account, requestor, status, archive_path, brojevi obrisanih zapisa, error, timestamps)
+
+- **Worker** (`scanner_worker.sh`):
+  - Nova funkcija `process_maintenance_requests()` — obrađuje queued maintenance zahtjeve
+  - Za `scope=account`: zip karantene, brisanje karantene, DB cleanup samo za taj account
+  - Za `scope=all`: zip cijele karantene, brisanje sadržaja karantene, DELETE svih results tablica
+  - Brojeví obrisanih zapisa računaju se `SELECT COUNT(*)` *prije* brisanja (ispravno, za razliku od `ROW_COUNT()` koji nije pouzdan između mysql poziva)
+
+- **Admin sidebar**: dodana stavka "Očisti rezultate" u sekciju "Podaci"
+
+### Security & Safety
+
+- `QUARANTINE_BASE` se provjerava prije svakog rm: ne smije biti prazan, `/` ni `/home`
+- `account_name` u workeru: provjera `/`, `..`, whitespace; mora postojati u `findings`
+- `qdir` mora biti unutar `QUARANTINE_BASE` (case pattern match) — `rm -rf` se ne izvršava ako nije
+- Brisanje karantene SAMO nakon uspješnog ZIP-a (`zip_done=1`); ako ZIP padne, `continue`
+- Nepostojanje karantene za account nije fatal: `zip_done=1`, `qdir_existed=0`, DB cleanup nastavlja
+- PHP web panel nikad ne briše filesystem — sve destruktivne operacije rade root worker
+- Tablica `scanner_maintenance_requests` je audit log i namjerno se ne briše ni u "Očisti sve"
+
+### Not changed
+
+- `scanner_rules`, `scanner_users`, `scanner_user_accounts`, `scanner_settings`, `scanner_migrations`, `scanner_ignore_list` — nisu dirani
+
+---
+
 ## [2.5.3] — 2026-06-29
 
 ### Added

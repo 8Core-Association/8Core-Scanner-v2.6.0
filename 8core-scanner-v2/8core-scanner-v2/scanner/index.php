@@ -244,7 +244,7 @@ $backParams = http_build_query(array(
       </div>
       <span class="logo-text">8Core Scanner</span>
     </div>
-    <div class="logo-version">IOC Scanner v2.5.3</div>
+    <div class="logo-version">IOC Scanner v2.6.0</div>
   </div>
 
   <nav class="sidebar-nav">

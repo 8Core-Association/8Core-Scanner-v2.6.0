@@ -341,8 +341,9 @@ process_file_actions() {
 }
 
 process_maintenance_requests() {
-  local rows id scope account_name arch_dir arch_file ts qdir
+  local rows id scope account_name arch_dir arch_file ts qdir qbase_clean
   local cnt_findings cnt_actions cnt_scans cnt_scan_req cnt_qitems err
+  local zip_done qdir_existed
 
   rows=$(mysql_run "
     SELECT id, scope, IFNULL(account_name,'')
@@ -372,8 +373,30 @@ process_maintenance_requests() {
     cnt_scan_req=0
     cnt_qitems=0
     arch_file=""
+    zip_done=0
+    qdir_existed=0
 
     ts=$(date '+%Y%m%d_%H%M%S')
+
+    # ── Hard safety check: QUARANTINE_BASE ─────────────────────────────────────
+    # Mora biti definirano, ne smije biti /, /home, niti prazan string
+    if [ -z "$QUARANTINE_BASE" ]; then
+      err="QUARANTINE_BASE nije postavljen u konfiguraciji"
+      mysql_run "UPDATE scanner_maintenance_requests SET status='failed', error='$(sql_escape "$err")', finished_at=NOW() WHERE id=$id;"
+      log "Maintenance ID=$id FAILED: $err"
+      continue
+    fi
+
+    qbase_clean="${QUARANTINE_BASE%/}"
+
+    case "$qbase_clean" in
+      ""|"/"|"/home")
+        err="QUARANTINE_BASE je nesigurna putanja: $QUARANTINE_BASE"
+        mysql_run "UPDATE scanner_maintenance_requests SET status='failed', error='$(sql_escape "$err")', finished_at=NOW() WHERE id=$id;"
+        log "Maintenance ID=$id FAILED: $err"
+        continue
+        ;;
+    esac
 
     if [ "$scope" = "account" ]; then
 
@@ -385,128 +408,152 @@ process_maintenance_requests() {
         continue
       fi
 
-      # Zaštita: ne smije sadržavati / ili ..
+      # Ne smije sadržavati /, .., whitespace ni prazni string
       case "$account_name" in
-        */*|*..)
-          err="account_name sadrži nesigurne znakove"
+        */*|*..*)
+          err="account_name sadrži nesigurne znakove (/ ili ..)"
+          mysql_run "UPDATE scanner_maintenance_requests SET status='failed', error='$(sql_escape "$err")', finished_at=NOW() WHERE id=$id;"
+          log "Maintenance ID=$id FAILED: $err"
+          continue
+          ;;
+      esac
+      case "$account_name" in
+        *[[:space:]]*)
+          err="account_name sadrži whitespace"
           mysql_run "UPDATE scanner_maintenance_requests SET status='failed', error='$(sql_escape "$err")', finished_at=NOW() WHERE id=$id;"
           log "Maintenance ID=$id FAILED: $err"
           continue
           ;;
       esac
 
-      # Account mora biti u bazi
+      # Account mora biti u bazi (provjera existence, ne samo u zahtjevu)
       local acc_check
       acc_check=$(mysql_run "SELECT COUNT(*) FROM findings WHERE account_name='$(sql_escape "$account_name")' LIMIT 1;")
       if [ "$acc_check" = "0" ]; then
-        err="account_name ne postoji u findings"
+        err="account_name '$account_name' ne postoji u findings"
         mysql_run "UPDATE scanner_maintenance_requests SET status='failed', error='$(sql_escape "$err")', finished_at=NOW() WHERE id=$id;"
         log "Maintenance ID=$id FAILED: $err"
         continue
       fi
 
-      # ── ZIP karantene za account ────────────────────────────────────────────
-      qdir="${QUARANTINE_BASE%/}/${account_name}"
-      arch_file="${arch_dir}/quarantine_$(sql_escape "$account_name")_${ts}.zip"
+      # qdir mora biti unutar QUARANTINE_BASE — konstruiramo i odmah provjeravamo
+      qdir="${qbase_clean}/${account_name}"
 
-      if [ -d "$qdir" ] && [ "$(ls -A "$qdir" 2>/dev/null)" ]; then
-        if zip -r -q "$arch_file" "$qdir"/; then
-          log "Maintenance ID=$id ZIP OK: $arch_file"
-        else
-          err="ZIP neuspješan za $qdir"
+      # Finalna provjera: qdir ne smije biti jednak qbase_clean niti izvan njega
+      case "$qdir" in
+        "${qbase_clean}/"*)
+          : # OK
+          ;;
+        *)
+          err="qdir izvan QUARANTINE_BASE — safety abort ($qdir)"
           mysql_run "UPDATE scanner_maintenance_requests SET status='failed', error='$(sql_escape "$err")', finished_at=NOW() WHERE id=$id;"
           log "Maintenance ID=$id FAILED: $err"
           continue
+          ;;
+      esac
+
+      # ── ZIP karantene za account (ako direktorij postoji i nije prazan) ───────
+      if [ -d "$qdir" ]; then
+        qdir_existed=1
+        cnt_qitems=$(find "$qdir" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+
+        if [ "${cnt_qitems:-0}" -gt 0 ]; then
+          arch_file="${arch_dir}/quarantine_${account_name}_${ts}.zip"
+          if zip -r -q "$arch_file" "$qdir"/; then
+            zip_done=1
+            log "Maintenance ID=$id ZIP OK: $arch_file (${cnt_qitems} fajlova)"
+          else
+            err="ZIP neuspješan za $qdir — brisanje prekinuto"
+            mysql_run "UPDATE scanner_maintenance_requests SET status='failed', error='$(sql_escape "$err")', finished_at=NOW() WHERE id=$id;"
+            log "Maintenance ID=$id FAILED: $err"
+            continue
+          fi
+        else
+          # Direktorij postoji ali je prazan — nema što zipati, ali brisanje je OK
+          zip_done=1
+          log "Maintenance ID=$id karantena prazna: $qdir — preskačem ZIP, brisanje dopušteno"
         fi
       else
-        log "Maintenance ID=$id karantena prazna ili ne postoji: $qdir — preskačem ZIP"
-        arch_file=""
+        # Karantena za ovaj account ne postoji — nije fatalno, samo nastavljamo s DB cleanupom
+        zip_done=1
+        log "Maintenance ID=$id karantena ne postoji: $qdir — preskačem ZIP i rm, nastavljam s DB cleanupom"
       fi
 
-      # ── Broj fajlova u karanteni za account ─────────────────────────────────
-      if [ -n "$arch_file" ]; then
-        cnt_qitems=$(find "$qdir" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
-      fi
-
-      # ── Brisanje karantene accounta ─────────────────────────────────────────
-      # Dodatna zaštita: qdir mora biti unutar QUARANTINE_BASE i ne smije biti prazan
-      if [ -n "$qdir" ] && [ "$qdir" != "/" ] && [ "$qdir" != "$QUARANTINE_BASE" ]; then
-        case "$qdir" in
-          "${QUARANTINE_BASE%/}/"*)
-            rm -rf -- "$qdir" && log "Maintenance ID=$id karantena obrisana: $qdir" || log "Maintenance ID=$id rm karantena FAILED: $qdir"
-            ;;
-          *)
-            log "Maintenance ID=$id SKIP rm: qdir izvan QUARANTINE_BASE ($qdir)"
-            ;;
-        esac
+      # ── Brisanje karantene accounta (SAMO ako je ZIP uspješan ili direktorij nije postojao) ──
+      if [ "$zip_done" = "1" ] && [ "$qdir_existed" = "1" ]; then
+        rm -rf -- "$qdir" \
+          && log "Maintenance ID=$id karantena obrisana: $qdir" \
+          || log "Maintenance ID=$id WARN: rm karantene nije uspio: $qdir"
       fi
 
       # ── Brisanje iz baze za account ─────────────────────────────────────────
-      # Prikupi finding ID-eve za account
-      local finding_ids
-      finding_ids=$(mysql_run "SELECT GROUP_CONCAT(id) FROM findings WHERE account_name='$(sql_escape "$account_name")';")
-
-      if [ -n "$finding_ids" ] && [ "$finding_ids" != "NULL" ]; then
-        # Obriši scanner_actions za te finding ID-eve
-        mysql_run "DELETE FROM scanner_actions WHERE finding_id IN ($finding_ids);"
-        cnt_actions=$(mysql_run "SELECT ROW_COUNT();")
-
-        # Obriši findings
-        mysql_run "DELETE FROM findings WHERE account_name='$(sql_escape "$account_name")';"
-        cnt_findings=$(mysql_run "SELECT ROW_COUNT();")
+      # Koristi COUNT prije/poslije umjesto ROW_COUNT (ROW_COUNT nije pouzdan između mysql poziva)
+      cnt_actions=$(mysql_run "SELECT COUNT(*) FROM scanner_actions sa INNER JOIN findings f ON sa.finding_id = f.id WHERE f.account_name='$(sql_escape "$account_name")';")
+      if [ "${cnt_actions:-0}" -gt 0 ]; then
+        local finding_ids
+        finding_ids=$(mysql_run "SELECT GROUP_CONCAT(id) FROM findings WHERE account_name='$(sql_escape "$account_name")';")
+        if [ -n "$finding_ids" ] && [ "$finding_ids" != "NULL" ]; then
+          mysql_run "DELETE FROM scanner_actions WHERE finding_id IN ($finding_ids);"
+        fi
       fi
 
-      # Obriši scans vezane za account (target_value = account_name)
-      mysql_run "DELETE FROM scans WHERE target_type='account' AND target_value='$(sql_escape "$account_name")';"
-      cnt_scans=$(mysql_run "SELECT ROW_COUNT();")
+      cnt_findings=$(mysql_run "SELECT COUNT(*) FROM findings WHERE account_name='$(sql_escape "$account_name")';")
+      mysql_run "DELETE FROM findings WHERE account_name='$(sql_escape "$account_name")';"
 
-      # Obriši scan_requests vezane za account
+      # scans: target_type i target_value postoje u shemi (potvrđeno)
+      cnt_scans=$(mysql_run "SELECT COUNT(*) FROM scans WHERE target_type='account' AND target_value='$(sql_escape "$account_name")';")
+      mysql_run "DELETE FROM scans WHERE target_type='account' AND target_value='$(sql_escape "$account_name")';"
+
+      # scanner_scan_requests: target_type i target_value postoje u shemi (potvrđeno)
+      cnt_scan_req=$(mysql_run "SELECT COUNT(*) FROM scanner_scan_requests WHERE target_type='account' AND target_value='$(sql_escape "$account_name")';")
       mysql_run "DELETE FROM scanner_scan_requests WHERE target_type='account' AND target_value='$(sql_escape "$account_name")';"
-      cnt_scan_req=$(mysql_run "SELECT ROW_COUNT();")
 
     elif [ "$scope" = "all" ]; then
 
-      # ── ZIP cijele karantene ────────────────────────────────────────────────
-      arch_file="${arch_dir}/quarantine_all_${ts}.zip"
+      # ── ZIP cijele karantene (ako postoji i nije prazna) ─────────────────────
+      if [ -d "$QUARANTINE_BASE" ]; then
+        cnt_qitems=$(find "$QUARANTINE_BASE" -mindepth 2 -maxdepth 2 -type f 2>/dev/null | wc -l | tr -d ' ')
 
-      if [ -d "$QUARANTINE_BASE" ] && [ "$(ls -A "$QUARANTINE_BASE" 2>/dev/null)" ]; then
-        if zip -r -q "$arch_file" "$QUARANTINE_BASE"/; then
-          log "Maintenance ID=$id ZIP OK: $arch_file"
+        if [ "${cnt_qitems:-0}" -gt 0 ]; then
+          arch_file="${arch_dir}/quarantine_all_${ts}.zip"
+          if zip -r -q "$arch_file" "$QUARANTINE_BASE"/; then
+            zip_done=1
+            log "Maintenance ID=$id ZIP OK: $arch_file (${cnt_qitems} fajlova)"
+          else
+            err="ZIP neuspješan za $QUARANTINE_BASE — brisanje prekinuto"
+            mysql_run "UPDATE scanner_maintenance_requests SET status='failed', error='$(sql_escape "$err")', finished_at=NOW() WHERE id=$id;"
+            log "Maintenance ID=$id FAILED: $err"
+            continue
+          fi
         else
-          err="ZIP neuspješan za $QUARANTINE_BASE"
-          mysql_run "UPDATE scanner_maintenance_requests SET status='failed', error='$(sql_escape "$err")', finished_at=NOW() WHERE id=$id;"
-          log "Maintenance ID=$id FAILED: $err"
-          continue
+          zip_done=1
+          log "Maintenance ID=$id karantena prazna ili ne sadrži fajlove — preskačem ZIP"
         fi
       else
-        log "Maintenance ID=$id karantena prazna ili ne postoji: $QUARANTINE_BASE — preskačem ZIP"
-        arch_file=""
+        zip_done=1
+        log "Maintenance ID=$id QUARANTINE_BASE ne postoji: $QUARANTINE_BASE — preskačem ZIP"
       fi
 
-      # Broj fajlova u cijeloj karanteni
-      if [ -n "$arch_file" ]; then
-        cnt_qitems=$(find "$QUARANTINE_BASE" -maxdepth 2 -type f 2>/dev/null | wc -l | tr -d ' ')
-      fi
-
-      # ── Brisanje sadržaja karantene (ne i sam direktorij) ───────────────────
-      if [ -d "$QUARANTINE_BASE" ] && [ -n "$QUARANTINE_BASE" ] && [ "$QUARANTINE_BASE" != "/" ]; then
-        find "$QUARANTINE_BASE" -mindepth 1 -maxdepth 2 -type f -delete 2>/dev/null || true
+      # ── Brisanje sadržaja karantene (SAMO ako je ZIP uspješan) ──────────────
+      # Briše fajlove i prazne poddirektorije, ne sam QUARANTINE_BASE direktorij
+      if [ "$zip_done" = "1" ] && [ -d "$QUARANTINE_BASE" ]; then
+        find "$QUARANTINE_BASE" -mindepth 2 -maxdepth 2 -type f -delete 2>/dev/null || true
         find "$QUARANTINE_BASE" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
         log "Maintenance ID=$id sadržaj karantene obrisan: $QUARANTINE_BASE"
       fi
 
-      # ── Čišćenje baze — sve tablice rezultata ──────────────────────────────
+      # ── Čišćenje baze — brojimo prije brisanja ──────────────────────────────
+      cnt_actions=$(mysql_run "SELECT COUNT(*) FROM scanner_actions;")
       mysql_run "DELETE FROM scanner_actions;"
-      cnt_actions=$(mysql_run "SELECT ROW_COUNT();")
 
+      cnt_findings=$(mysql_run "SELECT COUNT(*) FROM findings;")
       mysql_run "DELETE FROM findings;"
-      cnt_findings=$(mysql_run "SELECT ROW_COUNT();")
 
+      cnt_scan_req=$(mysql_run "SELECT COUNT(*) FROM scanner_scan_requests;")
       mysql_run "DELETE FROM scanner_scan_requests;"
-      cnt_scan_req=$(mysql_run "SELECT ROW_COUNT();")
 
+      cnt_scans=$(mysql_run "SELECT COUNT(*) FROM scans;")
       mysql_run "DELETE FROM scans;"
-      cnt_scans=$(mysql_run "SELECT ROW_COUNT();")
 
     else
       err="Nepoznat scope: $scope"
@@ -536,7 +583,7 @@ process_maintenance_requests() {
         finished_at=NOW()
       WHERE id=$id;
     "
-    log "Maintenance ID=$id DONE findings=${cnt_findings:-0} actions=${cnt_actions:-0} scans=${cnt_scans:-0} scan_req=${cnt_scan_req:-0} qitems=${cnt_qitems:-0} archive=$arch_file"
+    log "Maintenance ID=$id DONE findings=${cnt_findings:-0} actions=${cnt_actions:-0} scans=${cnt_scans:-0} scan_req=${cnt_scan_req:-0} qitems=${cnt_qitems:-0} archive=${arch_file:-none}"
 
   done <<< "$rows"
 }

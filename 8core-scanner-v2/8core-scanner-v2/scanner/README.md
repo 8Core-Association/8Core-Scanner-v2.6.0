@@ -1,4 +1,4 @@
-# 8Core Scanner v2.5.3
+# 8Core Scanner v2.6.0
 
 **Vlasnički softver — Sva prava pridržana**
 (c) 2026 Tomislav Galić / 8Core
@@ -12,6 +12,30 @@ Web: https://8core.hr | Kontakt: info@8core.hr
 Skenira korisničke račune na serveru tražeći zlonamjerne fajlove
 (web shellovi, obfusciran PHP, sumnjive ekstenzije i slično),
 a rezultate prikazuje kroz web panel s upravljanjem nalazima.
+
+### Administrativne funkcije
+
+| Funkcija | Opis |
+|---|---|
+| Upravljanje nalazima | Pregled, filtriranje, bulk akcije na nalazima |
+| Karantena | Pregled, restore, purge, ignore hash za karantenizirane fajlove |
+| **Očisti rezultate** | Admin alat za brisanje scan rezultata po accountu ili globalno; karantena se arhivira u ZIP prije brisanja |
+| Pravila i definicije | CRUD za IOC pravila |
+| Ignore lista | Upravljanje ignoriranim putanjama, fajlovima i hashevima |
+| Korisnici | Upravljanje korisnicima i dodjela accounta |
+| Update | Upload i primjena paketa nadogradnje |
+
+#### Očisti rezultate — napomena
+
+Admin može pokrenuti čišćenje nalaza za specifičan account ili globalno za sve accounte.
+Akcija se izvršava asinkrono: PHP samo kreira zahtjev u bazi (`scanner_maintenance_requests`),
+a root worker pri sljedećem pokretanju:
+1. Arhivira karantenu u ZIP (`/root/8core_scanner/quarantine_archives/`)
+2. Briše sadržaj karantene
+3. Briše nalaze, akcije, scan zapise i scan queue za odabrani scope
+4. Upisuje rezultat u audit tablicu
+
+Ne briše: scanner pravila, korisnike, postavke, migracije, ignore listu ni audit tablicu.
 
 ---
 
