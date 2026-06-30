@@ -56,7 +56,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pattern    = trim($_POST['pattern']     ?? '');
         $extensions = trim($_POST['extensions']  ?? '');
         $risk       = $_POST['risk']    ?? 'MEDIUM';
-        $active     = isset($_POST['active']) ? 1 : 0;
+        $active     = isset($_POST['active'])   ? 1 : 0;
+        $is_hard    = isset($_POST['is_hard'])  ? 1 : 0;
         $note       = trim($_POST['note'] ?? '');
 
         if (!array_key_exists($type, $TYPES)) $type = 'regex';
@@ -67,17 +68,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $messageType = 'error';
         } elseif ($formAction === 'create') {
             $pdo->prepare("
-                INSERT INTO scanner_rules (name, description, type, pattern, extensions, risk, active, note, created_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ")->execute([$name, $desc, $type, $pattern, $extensions ?: null, $risk, $active, $note ?: null, $user['username']]);
+                INSERT INTO scanner_rules (name, description, type, pattern, extensions, risk, active, is_hard, note, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ")->execute([$name, $desc, $type, $pattern, $extensions ?: null, $risk, $active, $is_hard, $note ?: null, $user['username']]);
             $message = "Pravilo \"$name\" kreirano.";
         } else {
             $id = (int)($_POST['id'] ?? 0);
             if ($id > 0) {
                 $pdo->prepare("
                     UPDATE scanner_rules SET name=?, description=?, type=?, pattern=?, extensions=?,
-                    risk=?, active=?, note=?, updated_at=NOW() WHERE id=?
-                ")->execute([$name, $desc, $type, $pattern, $extensions ?: null, $risk, $active, $note ?: null, $id]);
+                    risk=?, active=?, is_hard=?, note=?, updated_at=NOW() WHERE id=?
+                ")->execute([$name, $desc, $type, $pattern, $extensions ?: null, $risk, $active, $is_hard, $note ?: null, $id]);
                 $message = "Pravilo #$id ažurirano.";
             }
         }
@@ -258,6 +259,7 @@ input.row-check, #check-all {
   accent-color: var(--accent, #2563eb);
 }
 tr.row-selected td { background: #f0f7ff !important; }
+.badge-hard { background:#7c3aed;color:#fff;font-size:10px;padding:1px 6px;border-radius:999px;font-weight:700;letter-spacing:.03em; }
 </style>
 </head>
 <body>
@@ -385,6 +387,13 @@ tr.row-selected td { background: #f0f7ff !important; }
               Aktivno
             </label>
           </div>
+          <div class="rules-form-field">
+            <label class="rules-check-label" title="Hard pravilo uvijek pobijedi allowlist — primjenjuje se čak i ako je fajl na ignore/allowlisti.">
+              <input type="checkbox" name="is_hard" <?= !empty($editRule['is_hard']) ? 'checked' : '' ?>>
+              Hard pravilo
+              <span class="rules-hint" style="margin-left:4px;">(pobijedi allowlist)</span>
+            </label>
+          </div>
         </div>
 
         <div class="rules-form-actions">
@@ -429,6 +438,7 @@ tr.row-selected td { background: #f0f7ff !important; }
             <th>Naziv</th>
             <th>Tip</th>
             <th>Rizik</th>
+            <th>Hard</th>
             <th>Uzorak</th>
             <th>Ekstenzije</th>
             <th>Datum</th>
@@ -437,7 +447,7 @@ tr.row-selected td { background: #f0f7ff !important; }
         </thead>
         <tbody>
         <?php if (empty($rules)): ?>
-          <tr><td colspan="9" class="rules-empty">Nema pravila. Dodajte novo ili uvezite CSV.</td></tr>
+          <tr><td colspan="10" class="rules-empty">Nema pravila. Dodajte novo ili uvezite CSV.</td></tr>
         <?php endif; ?>
         <?php foreach ($rules as $rule): ?>
           <tr class="<?= $rule['active'] ? '' : 'rule-inactive-row' ?>" data-id="<?= (int)$rule['id'] ?>">
@@ -463,6 +473,13 @@ tr.row-selected td { background: #f0f7ff !important; }
             </td>
             <td><span class="rule-type-badge"><?= h($TYPES[$rule['type']] ?? $rule['type']) ?></span></td>
             <td><span class="badge <?= risk_class($rule['risk']) ?>"><?= h($rule['risk']) ?></span></td>
+            <td>
+              <?php if (!empty($rule['is_hard'])): ?>
+                <span class="badge badge-hard" title="Hard pravilo — pobijedi allowlist">HARD</span>
+              <?php else: ?>
+                <span style="color:var(--text-muted);font-size:11px;">soft</span>
+              <?php endif; ?>
+            </td>
             <td><code class="rule-pattern"><?= h(mb_strimwidth($rule['pattern'], 0, 60, '…')) ?></code></td>
             <td class="small"><?= h($rule['extensions'] ?? '—') ?></td>
             <td class="small"><?= h(substr($rule['created_at'] ?? '', 0, 10)) ?></td>

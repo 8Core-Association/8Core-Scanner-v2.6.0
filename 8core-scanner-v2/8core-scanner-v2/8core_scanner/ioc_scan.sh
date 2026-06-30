@@ -227,7 +227,7 @@ load_ignore_lists() {
   log "Ignore lista učitana: ${#IGNORE_FILES[@]} fajlova, ${#IGNORE_PATHS[@]} putanja, ${#IGNORE_HASHES[@]} hasheva, ${#IGNORE_USERS[@]} korisnika"
 }
 
-is_ignored() {
+is_soft_ignored() {
   local file="$1"
   local sha="$2"
   local entry
@@ -264,10 +264,14 @@ is_ignored() {
 }
 
 # ── Umetanje nalaza u bazu ───────────────────────────────────────────────────
+# $1 = rule name, $2 = risk, $3 = file path, $4 = is_hard (0|1, default 0)
+# is_hard=1: hard malware pravilo — ignore lista se ne primjenjuje
+# is_hard=0: soft pravilo — fajl se preskače ako matchira allowlist
 insert_finding() {
   local rule="$1"
   local risk="$2"
   local file="$3"
+  local is_hard="${4:-0}"
 
   [ -f "$file" ] || return
 
@@ -295,17 +299,26 @@ insert_finding() {
   source_guess="${source%%|*}"
   source_type="${source##*|}"
 
-  # SHA256: uvijek za HIGH/CRITICAL i kad postoji hash ignore lista
-  if [ "$risk" = "HIGH" ] || [ "$risk" = "CRITICAL" ] || [ "${#IGNORE_HASHES[@]}" -gt 0 ]; then
+  # SHA256: uvijek za hard pravila, HIGH/CRITICAL, i kad postoji hash ignore lista
+  if [ "$is_hard" = "1" ] || [ "$risk" = "HIGH" ] || [ "$risk" = "CRITICAL" ] || [ "${#IGNORE_HASHES[@]}" -gt 0 ]; then
     sha=$(sha256sum "$file" 2>/dev/null | awk '{print $1}')
   else
     sha=""
   fi
 
-  # Provjera ignore liste — preskoči ako je ignorirano
-  if is_ignored "$file" "$sha"; then
-    log "IGNORIRANO $file"
-    return 0
+  # Provjera ignore liste:
+  # Hard pravila (is_hard=1) uvijek pobijede — soft ignore se ne primjenjuje.
+  # Soft pravila (is_hard=0) se preskaču ako je fajl na allowlisti.
+  if [ "$is_hard" != "1" ]; then
+    if is_soft_ignored "$file" "$sha"; then
+      log "ALLOWLIST (soft pravilo '$rule') $file"
+      return 0
+    fi
+  else
+    # Hard pravilo: ignoriramo soft allowlist, ali logiramo ako bi bio ignoriran
+    if is_soft_ignored "$file" "$sha"; then
+      log "HARD OVERRIDE (allowlist ignorirana za '$rule') $file"
+    fi
   fi
 
   mysql_run "
@@ -355,49 +368,50 @@ _scan_find() {
 scan_pattern() {
   local title="$1"
   local risk="$2"
-  shift 2
+  local is_hard="$3"
+  shift 3
 
-  log "Skeniranje: $title [$risk]"
+  log "Skeniranje: $title [$risk]$([ "$is_hard" = "1" ] && echo " [HARD]")"
 
   _scan_find "$@" | while IFS= read -r file; do
-    insert_finding "$title" "$risk" "$file"
+    insert_finding "$title" "$risk" "$file" "$is_hard"
   done
 }
 
 # ── Učitaj ignore listu prije skeniranja ─────────────────────────────────────
 load_ignore_lists
 
-# ── Ugrađena pravila (hardkodirana, uvijek aktivna) ───────────────────────────
-scan_pattern "filefuns.php" "CRITICAL" \
+# ── Ugrađena pravila (hardkodirana, uvijek aktivna, uvijek HARD) ──────────────
+scan_pattern "filefuns.php" "CRITICAL" 1 \
   -type f -name "filefuns.php"
 
-scan_pattern ".sys-* datoteke" "HIGH" \
+scan_pattern ".sys-* datoteke" "HIGH" 1 \
   -type f -name ".sys-*"
 
-scan_pattern "adman marker txt" "HIGH" \
+scan_pattern "adman marker txt" "HIGH" 1 \
   -type f -name "adman.*.txt"
 
-scan_pattern "mixed-case PHP ekstenzije" "MEDIUM" \
+scan_pattern "mixed-case PHP ekstenzije" "MEDIUM" 1 \
   -type f \( -name "*.PHP" -o -name "*.Php" -o -name "*.pHp" -o -name "*.PHp" -o -name "*.phP" -o -name "*.pHP" \)
 
-scan_pattern "tmp izvršni web fajlovi" "HIGH" \
+scan_pattern "tmp izvršni web fajlovi" "HIGH" 1 \
   -type f \( -path "*/tmp/*.php" -o -path "*/tmp/*.php5" -o -path "*/tmp/*.phtml" -o -path "*/tmp/*.phar" \)
 
-scan_pattern "sumnjivi random index.php direktoriji" "HIGH" \
+scan_pattern "sumnjivi random index.php direktoriji" "HIGH" 1 \
   -type f -name "index.php" -size +10k \
   -regextype posix-extended \
   -regex '.*/([0-9a-f]{5,6}|[0-9]{5,6})/index\.php$'
 
-scan_pattern "cache.php sumnjive lokacije" "MEDIUM" \
+scan_pattern "cache.php sumnjive lokacije" "MEDIUM" 1 \
   -type f -name "cache.php"
 
-log "Skeniranje: poznati command shell indikatori [HIGH]"
+log "Skeniranje: poznati command shell indikatori [HIGH] [HARD]"
 
 _scan_find \
   -type f \( -name "*.php" -o -name "*.PHP" -o -name "*.Php" -o -name "*.pHp" -o -name "*.phtml" -o -name "*.php5" -o -name "*.phar" \) | \
   xargs -r grep -IlE "shell_exec|passthru|popen|proc_open|base64_decode|gzinflate|str_rot13|@eval|eval\(" 2>/dev/null | \
   while IFS= read -r file; do
-    insert_finding "poznati command shell indikatori" "HIGH" "$file"
+    insert_finding "poznati command shell indikatori" "HIGH" "$file" "1"
   done
 
 # ── Dinamička pravila iz baze (scanner_rules, active=1) ──────────────────────
@@ -405,7 +419,7 @@ run_dynamic_rules() {
   log "Pokretanje dinamičkih pravila iz baze..."
 
   local rules_raw
-  rules_raw=$(mysql_run "SELECT id, name, type, pattern, IFNULL(extensions,''), risk FROM scanner_rules WHERE active=1 ORDER BY id ASC;" 2>/dev/null)
+  rules_raw=$(mysql_run "SELECT id, name, type, pattern, IFNULL(extensions,''), risk, IFNULL(is_hard,0) FROM scanner_rules WHERE active=1 ORDER BY id ASC;" 2>/dev/null)
 
   if [ -z "$rules_raw" ]; then
     log "Nema aktivnih dinamičkih pravila u bazi."
@@ -413,29 +427,32 @@ run_dynamic_rules() {
   fi
 
   local count=0
-  while IFS=$'\t' read -r rule_id rule_name rule_type rule_pattern rule_exts rule_risk; do
+  while IFS=$'\t' read -r rule_id rule_name rule_type rule_pattern rule_exts rule_risk rule_is_hard; do
     [ -z "$rule_id" ] && continue
 
-    log "Dinamičko pravilo [$rule_risk] $rule_name (tip: $rule_type)"
+    # Normalizacija: tretiraj prazno kao 0
+    [ -z "$rule_is_hard" ] && rule_is_hard=0
+
+    log "Dinamičko pravilo [$rule_risk] $rule_name (tip: $rule_type, hard: $rule_is_hard)"
     count=$((count + 1))
 
     case "$rule_type" in
 
       filename)
         _scan_find -type f -name "$rule_pattern" | while IFS= read -r file; do
-          insert_finding "$rule_name" "$rule_risk" "$file"
+          insert_finding "$rule_name" "$rule_risk" "$file" "$rule_is_hard"
         done
         ;;
 
       path)
         _scan_find -type f -path "*${rule_pattern}*" | while IFS= read -r file; do
-          insert_finding "$rule_name" "$rule_risk" "$file"
+          insert_finding "$rule_name" "$rule_risk" "$file" "$rule_is_hard"
         done
         ;;
 
       regex)
         _scan_find -type f -regextype posix-extended -regex "$rule_pattern" | while IFS= read -r file; do
-          insert_finding "$rule_name" "$rule_risk" "$file"
+          insert_finding "$rule_name" "$rule_risk" "$file" "$rule_is_hard"
         done
         ;;
 
@@ -452,7 +469,7 @@ run_dynamic_rules() {
         done
         if [ "${#ext_args[@]}" -gt 0 ]; then
           _scan_find -type f \( "${ext_args[@]}" \) | while IFS= read -r file; do
-            insert_finding "$rule_name" "$rule_risk" "$file"
+            insert_finding "$rule_name" "$rule_risk" "$file" "$rule_is_hard"
           done
         fi
         ;;
@@ -476,19 +493,19 @@ run_dynamic_rules() {
         else
           _scan_find -type f
         fi | xargs -r grep -IlE "$rule_pattern" 2>/dev/null | while IFS= read -r file; do
-          insert_finding "$rule_name" "$rule_risk" "$file"
+          insert_finding "$rule_name" "$rule_risk" "$file" "$rule_is_hard"
         done
         ;;
 
       chmod)
         _scan_find -type f -perm "$rule_pattern" | while IFS= read -r file; do
-          insert_finding "$rule_name" "$rule_risk" "$file"
+          insert_finding "$rule_name" "$rule_risk" "$file" "$rule_is_hard"
         done
         ;;
 
       filesize)
         _scan_find -type f -size "$rule_pattern" | while IFS= read -r file; do
-          insert_finding "$rule_name" "$rule_risk" "$file"
+          insert_finding "$rule_name" "$rule_risk" "$file" "$rule_is_hard"
         done
         ;;
 

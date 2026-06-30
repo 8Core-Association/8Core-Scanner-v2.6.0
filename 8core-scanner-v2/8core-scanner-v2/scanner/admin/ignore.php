@@ -22,6 +22,56 @@ $CATEGORIES = [
     'user' => 'Ignorirani korisnici',
 ];
 
+/**
+ * Validira path/file unos u ignore listu.
+ * Vraća string s porukom greške ako je unos opasan, ili null ako je OK.
+ *
+ * Blokira:
+ * - Putanje kraće od /home/<account>/ (previše generičke)
+ * - Poznate root index.php i public_html/index.php kao global ignore
+ * - /home/ i /home/<account>/ kao path prefix (cijeli account bi bio skriven)
+ */
+function validate_ignore_path(string $category, string $value): ?string
+{
+    $v = rtrim($value, '/');
+
+    // Blokirati / i /home i /home/X kao path prefix
+    $dangerousPrefixes = ['/', '/home'];
+    foreach ($dangerousPrefixes as $dp) {
+        if ($v === $dp) {
+            return "Opasna generička putanja '$value' — ne smije se dodati u ignore listu. "
+                 . "Ignoriraj specifičan fajl ili podputanju, ne cijelu stablu.";
+        }
+    }
+
+    // Blokirati /home/<account> bez poddirektorija (cijeli account bi bio skriven)
+    if (preg_match('#^/home/[^/]+$#', $v)) {
+        return "Putanja '$value' je cijeli home direktorij accounta. "
+             . "Koristi kategoriju 'user' za ignoriranje cijelog accounta, ili specificaj točniju podputanju.";
+    }
+
+    // Blokirati generički root index.php koji nije unutar specifičnog podputa
+    // Npr. /home/account/public_html/index.php smije samo ako ima napomenu, ali
+    // blokiramo samo ako je path = /home/*/public_html/index.php (previše široko za 'path' kategoriju)
+    if ($category === 'path' && preg_match('#^/home/[^/]+/public_html/?$#', $v)) {
+        return "Putanja '$value' pokriva cijeli public_html direktorij. "
+             . "To bi sakrilo malware unutar njega. Specificaj uži poddirektorij ili koristi 'file' kategoriju za točan fajl.";
+    }
+
+    // Blokirati unos koji bi ignorirao poznate kritične malware putanje
+    $blockedPatterns = [
+        '#/tmp/?$#'   => "Direktorij /tmp je česta lokacija malwarea — ne smije se dodati kao ignore putanja.",
+        '#/cache/?$#' => "Direktorij /cache može sadržavati malware — koristi specifičniji path.",
+    ];
+    foreach ($blockedPatterns as $pattern => $reason) {
+        if (preg_match($pattern, $v)) {
+            return $reason;
+        }
+    }
+
+    return null;
+}
+
 // ── EXPORT ──────────────────────────────────────────────────────────────────
 if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     $rows = $pdo->query("SELECT category, value, note, created_at FROM scanner_ignore_list ORDER BY category, id")->fetchAll(PDO::FETCH_ASSOC);
@@ -54,11 +104,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $message     = 'Vrijednost ne smije biti prazna.';
             $messageType = 'error';
         } else {
+            // ── Blokiranje opasnih generičkih putanja ───────────────────────
+            if ($category === 'path' || $category === 'file') {
+                $blockReason = validate_ignore_path($category, $value);
+                if ($blockReason !== null) {
+                    $message     = $blockReason;
+                    $messageType = 'error';
+                    goto ignore_add_done;
+                }
+            }
             $pdo->prepare("
                 INSERT INTO scanner_ignore_list (category, value, note, created_by)
                 VALUES (?, ?, ?, ?)
             ")->execute([$category, $value, $note ?: null, $user['username']]);
             $message = "Dodano u ignore listu ($category).";
+            ignore_add_done:;
         }
     }
 
@@ -130,6 +190,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     // Normalize path: ensure trailing slash
                     if ($category === 'path' && substr($value, -1) !== '/') {
                         $value .= '/';
+                    }
+
+                    // Blokiranje opasnih generičkih putanja
+                    if ($category === 'path' || $category === 'file') {
+                        $blockReason = validate_ignore_path($category, $value);
+                        if ($blockReason !== null) {
+                            $errors[] = "Redak $lineNo: $blockReason";
+                            continue;
+                        }
                     }
 
                     // Check duplicate
