@@ -408,24 +408,41 @@ scan_pattern "cache.php sumnjive lokacije" "MEDIUM" 0 \
   -type f -name "cache.php"
 
 # ── Grep pravila splitana po is_hard ─────────────────────────────────────────
-# HARD: execution funkcije (shell_exec, passthru, popen, proc_open, eval) — jasni
-# malware indikatori koji izvršavaju kod; allowlist ne vrijedi.
-log "Skeniranje: PHP execution funkcije [HIGH] [HARD]"
+#
+# HARD: opasni request-execution patternovi koji zahtijevaju kontekst.
+# Matchira samo kad je request input ($_(POST|GET|REQUEST|COOKIE)) direktno
+# u execution funkciji, ili kad je eval wrappan oko obfuscation dekodiranja,
+# ili remote loader koji include-a URL.
+# Allowlist ne vrijedi.
+#
+# Pattern pokriva:
+#   1. eval/assert/system/shell_exec/passthru/exec/popen/proc_open + $_(POST|GET|REQUEST|COOKIE)
+#   2. preg_replace s /e modifierom
+#   3. eval(base64_decode(  /  eval(gzinflate(  /  eval(str_rot13(  /  eval(gzdecode(
+#   4. include/require/file_get_contents(http://)  — remote loader
+
+_HARD_PATTERN='(eval|assert|system|shell_exec|passthru|exec|popen|proc_open)\s*\(\s*\$_(POST|GET|REQUEST|COOKIE)'
+_HARD_PATTERN="${_HARD_PATTERN}"'|preg_replace\s*\(\s*['"'"'"][^'"'"'"]{0,200}\/e['"'"'"]'
+_HARD_PATTERN="${_HARD_PATTERN}"'|eval\s*\(\s*(base64_decode|gzinflate|gzdecode|gzuncompress|str_rot13)\s*\('
+_Q="'\""
+_HARD_PATTERN="${_HARD_PATTERN}|(include|require|include_once|require_once|file_get_contents)\\s*\\(\\s*[${_Q}](https?|ftp)://"
+
+log "Skeniranje: opasni request-execution patternovi [CRITICAL] [HARD]"
 _scan_find \
   -type f \( -name "*.php" -o -name "*.PHP" -o -name "*.Php" -o -name "*.pHp" -o -name "*.phtml" -o -name "*.php5" -o -name "*.phar" \) | \
-  xargs -r grep -IlE "shell_exec|passthru|popen|proc_open|@eval|eval\(" 2>/dev/null | \
+  xargs -r grep -IlP "$_HARD_PATTERN" 2>/dev/null | \
   while IFS= read -r file; do
-    insert_finding "PHP execution funkcije" "HIGH" "$file" "1"
+    insert_finding "opasni request-execution patternovi" "CRITICAL" "$file" "1"
   done
 
-# SOFT: encoding/obfuscation funkcije same po sebi — česti false-positive u
-# legitimnim libraryima; suppressaju se allowlistom.
-log "Skeniranje: PHP encoding/obfuscation funkcije [MEDIUM]"
+# SOFT: suspektne funkcije same po sebi — česti false-positive u vendoru, libraryima,
+# legitnim CMS core fajlovima; suppressaju se allowlistom.
+log "Skeniranje: suspektne PHP funkcije [MEDIUM]"
 _scan_find \
   -type f \( -name "*.php" -o -name "*.PHP" -o -name "*.Php" -o -name "*.pHp" -o -name "*.phtml" -o -name "*.php5" -o -name "*.phar" \) | \
-  xargs -r grep -IlE "base64_decode|gzinflate|str_rot13" 2>/dev/null | \
+  xargs -r grep -IlE "eval\(|shell_exec\(|passthru\(|exec\(|system\(|popen\(|proc_open\(|base64_decode\(|gzinflate\(|str_rot13\(" 2>/dev/null | \
   while IFS= read -r file; do
-    insert_finding "PHP encoding/obfuscation funkcije" "MEDIUM" "$file" "0"
+    insert_finding "suspektne PHP funkcije" "MEDIUM" "$file" "0"
   done
 
 # ── Dinamička pravila iz baze (scanner_rules, active=1) ──────────────────────
