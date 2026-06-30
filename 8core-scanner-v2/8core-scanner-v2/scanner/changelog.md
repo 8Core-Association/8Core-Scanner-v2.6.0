@@ -6,6 +6,25 @@ Verzioniranje slijedi [Semantic Versioning](https://semver.org/lang/hr/).
 
 ---
 
+## [2.6.2] — 2026-06-30
+
+### Changed
+
+- **`ioc_scan.sh`** — ispravka klasifikacije remote URL patterna:
+  - `file_get_contents('http://...')` i `fopen('http://...')` **premješteni iz HARD u SOFT** — remote download sam po sebi nije napad (legit API/update pozivi)
+  - `include/require/include_once/require_once('http://...')` ostaju **HARD** — direktno izvršavanje remote PHP-a
+  - `eval(file_get_contents('http://...'))` dodan kao novi **HARD** pattern — remote download + eval = execution
+  - Dodan novi SOFT scan **"remote URL download" [LOW]** za `file_get_contents` i `fopen` s HTTP/HTTPS URL-om
+  - Dodan `curl_exec(` u postojeći SOFT scan "suspektne PHP funkcije" [MEDIUM]
+  - Komentar bloka usklađen s novom logikom
+
+### Security
+
+- Smanjeni false-positivi za legit PHP kod koji koristi remote API-je, update provjere i download helpere
+- Hard pravila sada precizno ciljaju **execution** kontekst, ne samo prisutnost URL stringa
+
+---
+
 ## [2.6.0] — 2026-06-30
 
 ### Added
