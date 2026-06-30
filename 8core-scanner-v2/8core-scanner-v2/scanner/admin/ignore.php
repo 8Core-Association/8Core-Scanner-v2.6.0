@@ -322,6 +322,11 @@ $items = $stmt->fetchAll();
       <?php endforeach; ?>
     </div>
 
+    <div class="notice info" style="font-size:12px;margin-bottom:16px;">
+      <strong>Kako radi allowlist:</strong>
+      Allowlist suppressa samo soft/false-positive nalaze. Hard malware pravila (npr. PHP execution funkcije kao <code>shell_exec</code>, <code>eval</code>) se uvijek prijavljuju bez obzira na ignore listu.
+    </div>
+
     <!-- FORMA ZA DODAVANJE -->
     <div class="panel">
       <h2>Dodaj u: <?= h($CATEGORIES[$activeTab]) ?></h2>
@@ -380,6 +385,7 @@ $items = $stmt->fetchAll();
           user,accountname,ignore whole account
         </code>
         Dozvoljene kategorije: <strong>file, path, hash, user</strong>. Hash mora biti 64 hex znaka. Duplikati se preskaču automatski.
+        <br><strong>Napomena:</strong> Allowlist suppressa samo soft/false-positive nalaze. Hard malware pravila (npr. PHP execution funkcije) se uvijek prijavljuju — allowlist ih ne može sakriti.
       </div>
     </div>
 

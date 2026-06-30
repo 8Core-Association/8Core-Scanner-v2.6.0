@@ -381,37 +381,51 @@ scan_pattern() {
 # ── Učitaj ignore listu prije skeniranja ─────────────────────────────────────
 load_ignore_lists
 
-# ── Ugrađena pravila (hardkodirana, uvijek aktivna, uvijek HARD) ──────────────
-scan_pattern "filefuns.php" "CRITICAL" 1 \
+# ── Ugrađena pravila (hardkodirana, uvijek aktivna) ───────────────────────────
+# Filename/path pravila: is_hard=0 — temelje se na imenu/putanji, ne na sadržaju s
+# request inputom, pa mogu imati false-positive matcheve na legitimnim fajlovima.
+scan_pattern "filefuns.php" "CRITICAL" 0 \
   -type f -name "filefuns.php"
 
-scan_pattern ".sys-* datoteke" "HIGH" 1 \
+scan_pattern ".sys-* datoteke" "HIGH" 0 \
   -type f -name ".sys-*"
 
-scan_pattern "adman marker txt" "HIGH" 1 \
+scan_pattern "adman marker txt" "HIGH" 0 \
   -type f -name "adman.*.txt"
 
-scan_pattern "mixed-case PHP ekstenzije" "MEDIUM" 1 \
+scan_pattern "mixed-case PHP ekstenzije" "MEDIUM" 0 \
   -type f \( -name "*.PHP" -o -name "*.Php" -o -name "*.pHp" -o -name "*.PHp" -o -name "*.phP" -o -name "*.pHP" \)
 
-scan_pattern "tmp izvršni web fajlovi" "HIGH" 1 \
+scan_pattern "tmp izvršni web fajlovi" "HIGH" 0 \
   -type f \( -path "*/tmp/*.php" -o -path "*/tmp/*.php5" -o -path "*/tmp/*.phtml" -o -path "*/tmp/*.phar" \)
 
-scan_pattern "sumnjivi random index.php direktoriji" "HIGH" 1 \
+scan_pattern "sumnjivi random index.php direktoriji" "HIGH" 0 \
   -type f -name "index.php" -size +10k \
   -regextype posix-extended \
   -regex '.*/([0-9a-f]{5,6}|[0-9]{5,6})/index\.php$'
 
-scan_pattern "cache.php sumnjive lokacije" "MEDIUM" 1 \
+scan_pattern "cache.php sumnjive lokacije" "MEDIUM" 0 \
   -type f -name "cache.php"
 
-log "Skeniranje: poznati command shell indikatori [HIGH] [HARD]"
-
+# ── Grep pravila splitana po is_hard ─────────────────────────────────────────
+# HARD: execution funkcije (shell_exec, passthru, popen, proc_open, eval) — jasni
+# malware indikatori koji izvršavaju kod; allowlist ne vrijedi.
+log "Skeniranje: PHP execution funkcije [HIGH] [HARD]"
 _scan_find \
   -type f \( -name "*.php" -o -name "*.PHP" -o -name "*.Php" -o -name "*.pHp" -o -name "*.phtml" -o -name "*.php5" -o -name "*.phar" \) | \
-  xargs -r grep -IlE "shell_exec|passthru|popen|proc_open|base64_decode|gzinflate|str_rot13|@eval|eval\(" 2>/dev/null | \
+  xargs -r grep -IlE "shell_exec|passthru|popen|proc_open|@eval|eval\(" 2>/dev/null | \
   while IFS= read -r file; do
-    insert_finding "poznati command shell indikatori" "HIGH" "$file" "1"
+    insert_finding "PHP execution funkcije" "HIGH" "$file" "1"
+  done
+
+# SOFT: encoding/obfuscation funkcije same po sebi — česti false-positive u
+# legitimnim libraryima; suppressaju se allowlistom.
+log "Skeniranje: PHP encoding/obfuscation funkcije [MEDIUM]"
+_scan_find \
+  -type f \( -name "*.php" -o -name "*.PHP" -o -name "*.Php" -o -name "*.pHp" -o -name "*.phtml" -o -name "*.php5" -o -name "*.phar" \) | \
+  xargs -r grep -IlE "base64_decode|gzinflate|str_rot13" 2>/dev/null | \
+  while IFS= read -r file; do
+    insert_finding "PHP encoding/obfuscation funkcije" "MEDIUM" "$file" "0"
   done
 
 # ── Dinamička pravila iz baze (scanner_rules, active=1) ──────────────────────
