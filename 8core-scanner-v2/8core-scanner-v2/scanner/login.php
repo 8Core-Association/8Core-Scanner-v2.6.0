@@ -9,6 +9,7 @@
  */
 require __DIR__ . '/includes/auth.php';
 require __DIR__ . '/includes/helpers.php';
+require __DIR__ . '/includes/version.php';
 
 $error = '';
 
@@ -47,7 +48,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       </div>
       <div class="login-logo-text">
         <div class="name">8Core Scanner</div>
-        <div class="sub">Security Dashboard v2.5.3</div>
+        <div class="sub">Security Dashboard v<?= SCANNER_VERSION ?></div>
       </div>
     </div>
 

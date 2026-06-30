@@ -13,6 +13,7 @@
  */
 require __DIR__ . '/../includes/auth.php';
 require __DIR__ . '/../includes/helpers.php';
+require __DIR__ . '/../includes/version.php';
 require_admin();
 
 $config      = require __DIR__ . '/../includes/config.php';
@@ -113,7 +114,7 @@ function generate_root_update_script(
     $patchGroup = build_conf_patch('WEB_PANEL_GROUP', $wpGroupQ, $overwriteWp);
 
     $s  = '#!/bin/bash' . $nl
-        . '# 8Core Scanner v2.5.3 — Root engine UPDATE skripta' . $nl
+        . '# 8Core Scanner v' . SCANNER_VERSION . ' — Root engine UPDATE skripta' . $nl
         . '# Paket verzija: ' . $packageVersion . $nl
         . '# Generirano: ' . date('Y-m-d H:i:s') . $nl
         . '# POKRENUTI KAO ROOT: bash /root/update_8core_scanner.sh' . $nl
@@ -614,7 +615,7 @@ code { background:var(--bg); padding:1px 5px; border-radius:4px; font-size:12px;
           <button type="submit" class="btn btn-primary">Upload i dry-run</button>
         </div>
         <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0;">
-          Uploadaj ZIP paket (npr. <code>8core-scanner-v2.5.3.zip</code>). Prikazuje dry-run prikaz prije primjene.
+          Uploadaj ZIP paket (npr. <code>8core-scanner-v<?= SCANNER_VERSION ?>.zip</code>). Prikazuje dry-run prikaz prije primjene.
         </p>
       </form>
     </div>

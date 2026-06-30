@@ -1,0 +1,17 @@
+{
+  "package": "8core-scanner",
+  "version": "2.6.0",
+  "release_date": "2026-06-30",
+  "sha256": "bfd4f688e0580ddd27db3724ff00aa54020f7274bec8990e61244eb95071af95",
+  "protected_files": [
+    "includes/config.php",
+    "install/install.lock"
+  ],
+  "migrations": [
+    {
+      "file": "scanner/install/migrations/20260630_003_add_maintenance_requests.sql",
+      "description": "Dodaje tablicu scanner_maintenance_requests za zahtjeve ciscenja rezultata"
+    }
+  ],
+  "changelog": "scanner/changelog.md"
+}

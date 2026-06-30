@@ -9,6 +9,7 @@
  */
 require __DIR__ . '/includes/auth.php';
 require __DIR__ . '/includes/helpers.php';
+require __DIR__ . '/includes/version.php';
 
 require_login();
 
@@ -215,7 +216,7 @@ function scan_status_class($s) {
       </div>
       <span class="logo-text">8Core Scanner</span>
     </div>
-    <div class="logo-version">IOC Scanner v2.5.3</div>
+    <div class="logo-version">IOC Scanner v<?= SCANNER_VERSION ?></div>
   </div>
 
   <nav class="sidebar-nav">

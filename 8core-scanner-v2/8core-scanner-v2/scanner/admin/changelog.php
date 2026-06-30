@@ -8,15 +8,18 @@ require __DIR__ . '/../includes/auth.php';
 require __DIR__ . '/../includes/helpers.php';
 require_admin();
 
-// Traži changelog.md: uz scanner/, pa jedan nivo iznad (paketni root)
+// Traži changelog.md isključivo uz scanner/ (produkcijska putanja: scanner/changelog.md)
 $candidates = [
-    __DIR__ . '/../../changelog.md',
     __DIR__ . '/../changelog.md',
-    dirname(dirname(__DIR__)) . '/changelog.md',
 ];
 $changelogFile = null;
 foreach ($candidates as $c) {
     if (file_exists($c)) { $changelogFile = $c; break; }
+}
+// Fallback: jedan nivo iznad (paketni root) samo ako scanner/ nema changelog
+if (!$changelogFile) {
+    $fb = __DIR__ . '/../../changelog.md';
+    if (file_exists($fb)) $changelogFile = $fb;
 }
 
 $rawContent = $changelogFile ? file_get_contents($changelogFile) : null;
@@ -112,13 +115,39 @@ function render_changelog(string $md): string {
 .cl-h2 { font-size:15px; font-weight:700; color:var(--accent,#2563eb); margin:22px 0 4px; padding-bottom:6px; border-bottom:1px solid var(--border); }
 .cl-h3 { font-size:12px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.06em; margin:14px 0 4px; }
 .cl-p  { font-size:13px; color:var(--text); margin:2px 0; line-height:1.6; }
-.cl-list { margin:4px 0 4px 18px; padding:0; font-size:13px; color:var(--text); line-height:1.7; }
-.cl-list li { margin:1px 0; }
-.cl-code { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px 12px; font-size:11px; color:#86efac; overflow-x:auto; margin:6px 0; font-family:var(--font-mono,monospace); }
+.cl-list { margin:4px 0 4px 18px; padding:0; font-size:13px; color:var(--text); line-height:1.7; list-style:disc; }
+.cl-list li { margin:1px 0; color:var(--text); background:none; }
+/* inline code: světlá pozadina, tamni tekst — kontrast na bijeloj podlozi */
+.cl-wrap code,
+.cl-list code,
+.cl-p code {
+  background: #f1f5f9;
+  color: #0f172a;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+  border: 1px solid #e2e8f0;
+}
+/* fenced code block */
+.cl-code {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 11px;
+  color: #86efac;
+  overflow-x: auto;
+  margin: 6px 0;
+  font-family: var(--font-mono, monospace);
+}
 .cl-hr { border:none; border-top:1px solid var(--border); margin:16px 0; }
 .cl-spacer { height:6px; }
 .cl-source { font-size:11px; color:var(--text-muted); margin-bottom:14px; }
-code { background:var(--bg); padding:1px 5px; border-radius:4px; font-size:12px; font-family:var(--font-mono,monospace); }
+.cl-wrap a { color: var(--accent, #2563eb); }
+.cl-wrap a:hover { text-decoration: underline; }
+/* strong u listama */
+.cl-list strong, .cl-p strong { color: var(--text); }
 </style>
 </head>
 <body>

@@ -9,6 +9,7 @@
  */
 require __DIR__ . '/includes/auth.php';
 require __DIR__ . '/includes/helpers.php';
+require __DIR__ . '/includes/version.php';
 require_login();
 
 // Defaulti koji su uvijek definirani, čak i ako try padne
@@ -39,10 +40,11 @@ try {
     $relCol      = $hasRel      ? 'relative_path' : 'file_path';
     $detectedCol = $hasDetected ? 'detected_at'   : 'created_at';
 
-    $risk    = isset($_GET['risk'])    ? $_GET['risk']    : '';
-    $account = isset($_GET['account']) ? $_GET['account'] : '';
-    $status  = isset($_GET['status'])  ? $_GET['status']  : '';
-    $q       = isset($_GET['q'])       ? trim($_GET['q']) : '';
+    $risk     = isset($_GET['risk'])    ? $_GET['risk']    : '';
+    $account  = isset($_GET['account']) ? $_GET['account'] : '';
+    $status   = isset($_GET['status'])  ? $_GET['status']  : '';
+    $q        = isset($_GET['q'])       ? trim($_GET['q']) : '';
+    $filterId = isset($_GET['id'])      ? (int)$_GET['id'] : 0;
 
     $where  = array();
     $params = array();
@@ -67,6 +69,10 @@ try {
     if ($q !== '') {
         $where[]  = "(file_path LIKE ? OR file_name LIKE ? OR rule_name LIKE ?)";
         $params[] = "%$q%"; $params[] = "%$q%"; $params[] = "%$q%";
+    }
+    if ($filterId > 0) {
+        $where[]  = "id = ?";
+        $params[] = $filterId;
     }
 
     $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
@@ -163,54 +169,80 @@ try {
     exit;
 }
 
-// ── Inline preview fajla iz karantene (safe, read-only, 200 KB limit) ────────
-// Samo za admina; quarantine_path kolona mora postojati ($hasQPath)
+// ── Inline preview fajla (safe, read-only, 200 KB limit) ─────────────────────
+// Admin only. Pokušava quarantine_path, a ako ne postoji — file_path (original).
 $preview   = null;
 $previewId = isset($_GET['preview_id']) ? (int)$_GET['preview_id'] : 0;
 
-if ($previewId > 0 && is_admin() && $hasQPath) {
+if ($previewId > 0 && is_admin()) {
     try {
         $pfStmt = $pdo->prepare("
-            SELECT id, file_path, quarantine_path, account_name, sha256,
-                   perms, owner_name, group_name, file_size, mtime, rule_name
+            SELECT id, file_path, " . ($hasQPath ? "quarantine_path," : "'' AS quarantine_path,") . "
+                   account_name, sha256,
+                   perms, owner_name, group_name, file_size, mtime, rule_name,
+                   " . ($hasAction ? "action_status" : "'new' AS action_status") . "
             FROM findings WHERE id = ? LIMIT 1
         ");
         $pfStmt->execute(array($previewId));
         $pf = $pfStmt->fetch();
 
-        if ($pf && !empty($pf['quarantine_path'])) {
-            $qpath = $pf['quarantine_path'];
-            if (strpos($qpath, $qbase) !== 0) {
-                $preview = array('error' => 'Nesigurna putanja — preview odbijen.');
-            } elseif (!file_exists($qpath)) {
-                $preview = array('error' => 'Fajl u karanteni nije pronađen na disku.');
+        if (!$pf) {
+            $preview = array('error' => 'Nalaz nije pronađen.');
+        } else {
+            // Odaberi putanju: preferiramo quarantine_path ako postoji i file postoji
+            $qpath      = $pf['quarantine_path'] ?? '';
+            $filePath   = $pf['file_path'] ?? '';
+            $readPath   = '';
+            $pathLabel  = '';
+            $fromQuaran = false;
+
+            if (!empty($qpath) && file_exists($qpath)) {
+                // Provjeri prefix karantene za sigurnost
+                if (strpos($qpath, $qbase) === 0) {
+                    $readPath   = $qpath;
+                    $pathLabel  = 'karantena';
+                    $fromQuaran = true;
+                } else {
+                    $preview = array('error' => 'Nesigurna karantenska putanja — preview odbijen.');
+                }
+            } elseif (!empty($filePath) && file_exists($filePath)) {
+                // Original file — provjeri da je unutar /home/
+                if (strpos($filePath, '/home/') === 0) {
+                    $readPath  = $filePath;
+                    $pathLabel = 'original';
+                } else {
+                    $preview = array('error' => 'Originalni fajl nije unutar /home/ — preview odbijen.');
+                }
             } else {
-                $rawSize  = filesize($qpath);
+                $whyMissing = !empty($qpath) ? 'Fajl u karanteni nije pronađen.' : 'Originalni fajl nije pronađen na disku.';
+                $preview = array('error' => $whyMissing . ' (' . h($filePath) . ')');
+            }
+
+            if ($preview === null && $readPath !== '') {
+                $rawSize  = filesize($readPath);
                 $maxRead  = 200 * 1024;
-                $raw      = file_get_contents($qpath, false, null, 0, $maxRead);
+                $raw      = file_get_contents($readPath, false, null, 0, $maxRead);
                 $isBinary = strpos(substr($raw, 0, 8192), "\0") !== false;
-                $sha256   = hash_file('sha256', $qpath);
+                $sha256   = hash_file('sha256', $readPath);
                 $preview  = array(
-                    'id'         => $pf['id'],
-                    'file_path'  => $pf['file_path'],
-                    'qpath'      => $qpath,
-                    'sha256'     => $sha256,
-                    'sha256_det' => $pf['sha256'],
-                    'size'       => $rawSize,
-                    'perms'      => $pf['perms'],
-                    'owner'      => $pf['owner_name'],
-                    'group'      => $pf['group_name'],
-                    'mtime'      => $pf['mtime'],
-                    'rule'       => $pf['rule_name'],
-                    'binary'     => $isBinary,
-                    'truncated'  => ($rawSize > $maxRead),
-                    'content'    => $isBinary ? null : $raw,
+                    'id'          => $pf['id'],
+                    'file_path'   => $filePath,
+                    'read_path'   => $readPath,
+                    'path_label'  => $pathLabel,
+                    'from_quaran' => $fromQuaran,
+                    'sha256'      => $sha256,
+                    'sha256_det'  => $pf['sha256'],
+                    'size'        => $rawSize,
+                    'perms'       => $pf['perms'],
+                    'owner'       => $pf['owner_name'],
+                    'group'       => $pf['group_name'],
+                    'mtime'       => $pf['mtime'],
+                    'rule'        => $pf['rule_name'],
+                    'binary'      => $isBinary,
+                    'truncated'   => ($rawSize > $maxRead),
+                    'content'     => $isBinary ? null : $raw,
                 );
             }
-        } elseif ($pf) {
-            $preview = array('error' => 'Nalaz nije u karanteni — preview nije dostupan.');
-        } else {
-            $preview = array('error' => 'Nalaz nije pronađen.');
         }
     } catch (Throwable $previewEx) {
         $preview = array('error' => 'Greška pri učitavanju previewa: ' . $previewEx->getMessage());
@@ -222,6 +254,7 @@ $backParams = http_build_query(array(
     'account' => is_admin() ? $account : '',
     'status'  => $status,
     'q'       => $q,
+    'id'      => $filterId > 0 ? $filterId : '',
 ));
 ?>
 <!doctype html>
@@ -244,7 +277,7 @@ $backParams = http_build_query(array(
       </div>
       <span class="logo-text">8Core Scanner</span>
     </div>
-    <div class="logo-version">IOC Scanner v2.6.0</div>
+    <div class="logo-version">IOC Scanner v<?= SCANNER_VERSION ?></div>
   </div>
 
   <nav class="sidebar-nav">
@@ -431,6 +464,8 @@ $backParams = http_build_query(array(
       </select>
 
       <input type="text" name="q" value="<?= h($q) ?>" placeholder="Pretraga file / path / rule">
+      <input type="number" name="id" value="<?= $filterId > 0 ? $filterId : '' ?>"
+             placeholder="ID" min="1" style="width:90px;" title="ID nalaza">
       <button type="submit" class="btn btn-primary btn-sm">Filtriraj</button>
       <a href="index.php" class="btn btn-ghost btn-sm">Reset</a>
     </form>
@@ -545,13 +580,13 @@ $backParams = http_build_query(array(
                       <span class="dot"></span>Vrati iz karantene
                     </button>
                   </form>
+                  <?php endif; ?>
                   <?php if (is_admin()): ?>
                   <a href="?preview_id=<?= (int)$f['id'] ?>&<?= h($backParams) ?>"
                      class="action-menu-item" style="text-decoration:none;color:var(--text);"
                      onclick="event.stopPropagation()">
                     <span class="dot" style="background:#64748b"></span>Preview sadržaja
                   </a>
-                  <?php endif; ?>
                   <?php endif; ?>
                 </div>
               </div>
@@ -658,8 +693,12 @@ $backParams = http_build_query(array(
       <div class="notice error"><?= h($preview['error']) ?></div>
     <?php else: ?>
       <div class="finding-preview-meta">
-        <span><b>Original:</b> <?= h($preview['file_path']) ?></span>
-        <span><b>Karantena:</b> <?= h($preview['qpath']) ?></span>
+        <span><b>Original path:</b> <?= h($preview['file_path']) ?></span>
+        <?php if ($preview['from_quaran']): ?>
+        <span><b>Čita se iz:</b> karantena — <?= h($preview['read_path']) ?></span>
+        <?php else: ?>
+        <span><b>Čita se iz:</b> original (<?= h($preview['path_label']) ?>)</span>
+        <?php endif; ?>
         <span><b>Veličina:</b> <?= number_format($preview['size']) ?> B<?= $preview['truncated'] ? ' (prikazano prvih 200 KB)' : '' ?></span>
         <span><b>Owner:</b> <?= h($preview['owner']) ?> / <?= h($preview['group']) ?></span>
         <span><b>Dozvole:</b> <?= h($preview['perms']) ?></span>
@@ -667,7 +706,7 @@ $backParams = http_build_query(array(
         <span><b>Pravilo:</b> <?= h($preview['rule']) ?></span>
       </div>
       <div class="finding-preview-meta" style="margin-top:6px;">
-        <span style="width:100%;"><b>SHA-256 (karantena):</b>
+        <span style="width:100%;"><b>SHA-256 (čitano):</b>
           <span class="finding-sha"><?= h($preview['sha256']) ?></span>
         </span>
         <?php if (!empty($preview['sha256_det'])): ?>

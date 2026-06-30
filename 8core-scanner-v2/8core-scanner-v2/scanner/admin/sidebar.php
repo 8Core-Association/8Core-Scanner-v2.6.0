@@ -1,9 +1,10 @@
 <?php
 /**
- * 8Core Scanner v2.5.3 — Admin sidebar
+ * 8Core Scanner v2.6.0 — Admin sidebar
  * (c) 2026 Tomislav Galić <tomislav@8core.hr>
  * Sva prava pridržana.
  */
+require_once __DIR__ . '/../includes/version.php';
 $currentFile = basename($_SERVER['PHP_SELF']);
 function sb_active($file) {
     global $currentFile;
@@ -18,7 +19,7 @@ function sb_active($file) {
       </div>
       <span class="logo-text">8Core Scanner</span>
     </div>
-    <div class="logo-version">Admin Panel v2.6.0</div>
+    <div class="logo-version">Admin Panel v<?= SCANNER_VERSION ?></div>
   </div>
 
   <nav class="sidebar-nav">
