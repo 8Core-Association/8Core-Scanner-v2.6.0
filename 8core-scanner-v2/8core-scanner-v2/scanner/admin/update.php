@@ -531,6 +531,32 @@ code { background:var(--bg); padding:1px 5px; border-radius:4px; font-size:12px;
 .wp-regen-btn:hover { background:#1d4ed8; color:#fff; }
 .wp-regen-btn:disabled { opacity:.5; cursor:default; }
 .wp-status { font-size:12px; color:#4ade80; margin-left:10px; }
+/* ── C) Root engine panel: kontrast na tamnoj podlozi ── */
+.root-engine-panel label,
+.root-engine-panel .wp-field label {
+  color: #94a3b8;
+}
+.root-engine-panel .wp-detected {
+  color: #64748b;
+}
+.root-engine-panel .wp-field input[type=text] {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-color: #334155;
+}
+.root-engine-panel .wp-field input[type=text]::placeholder {
+  color: #475569;
+}
+.root-engine-panel .wp-field input[type=text]:focus {
+  border-color: #3b82f6;
+  color: #f1f5f9;
+}
+.root-engine-panel .wp-check {
+  color: #cbd5e1;
+}
+.root-engine-panel .wp-check span {
+  color: #64748b;
+}
 </style>
 </head>
 <body>
@@ -676,7 +702,7 @@ code { background:var(--bg); padding:1px 5px; border-radius:4px; font-size:12px;
       </p>
 
       <!-- Web panel permisije forma -->
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px 18px;margin-bottom:16px;">
+      <div class="root-engine-panel" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px 18px;margin-bottom:16px;">
         <div style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px;">
           Web panel permisije karantene
         </div>

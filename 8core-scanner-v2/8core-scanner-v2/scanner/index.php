@@ -44,7 +44,16 @@ try {
     $account  = isset($_GET['account']) ? $_GET['account'] : '';
     $status   = isset($_GET['status'])  ? $_GET['status']  : '';
     $q        = isset($_GET['q'])       ? trim($_GET['q']) : '';
-    $filterId = isset($_GET['id'])      ? (int)$_GET['id'] : 0;
+    $filterIdRaw = isset($_GET['id']) ? trim($_GET['id']) : '';
+    // Parse comma-separated IDs; keep only positive integers
+    $filterIds = array();
+    foreach (explode(',', $filterIdRaw) as $part) {
+        $part = trim($part);
+        if ($part !== '' && ctype_digit($part) && (int)$part > 0) {
+            $filterIds[] = (int)$part;
+        }
+    }
+    $filterIds = array_unique($filterIds);
 
     $where  = array();
     $params = array();
@@ -70,9 +79,13 @@ try {
         $where[]  = "(file_path LIKE ? OR file_name LIKE ? OR rule_name LIKE ?)";
         $params[] = "%$q%"; $params[] = "%$q%"; $params[] = "%$q%";
     }
-    if ($filterId > 0) {
+    if (count($filterIds) === 1) {
         $where[]  = "id = ?";
-        $params[] = $filterId;
+        $params[] = $filterIds[0];
+    } elseif (count($filterIds) > 1) {
+        $placeholders = implode(',', array_fill(0, count($filterIds), '?'));
+        $where[]  = "id IN ($placeholders)";
+        foreach ($filterIds as $fid) $params[] = $fid;
     }
 
     $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
@@ -254,7 +267,7 @@ $backParams = http_build_query(array(
     'account' => is_admin() ? $account : '',
     'status'  => $status,
     'q'       => $q,
-    'id'      => $filterId > 0 ? $filterId : '',
+    'id'      => $filterIdRaw,
 ));
 ?>
 <!doctype html>
@@ -464,8 +477,8 @@ $backParams = http_build_query(array(
       </select>
 
       <input type="text" name="q" value="<?= h($q) ?>" placeholder="Pretraga file / path / rule">
-      <input type="number" name="id" value="<?= $filterId > 0 ? $filterId : '' ?>"
-             placeholder="ID" min="1" style="width:90px;" title="ID nalaza">
+      <input type="text" name="id" value="<?= h($filterIdRaw) ?>"
+             placeholder="ID ili ID-evi" style="width:130px;" title="ID nalaza (npr. 3710 ili 3710,3711,3712)">
       <button type="submit" class="btn btn-primary btn-sm">Filtriraj</button>
       <a href="index.php" class="btn btn-ghost btn-sm">Reset</a>
     </form>
@@ -604,6 +617,22 @@ $backParams = http_build_query(array(
                   <span class="detail-label">Full path</span>
                   <span class="detail-value mono"><?= h($f['file_path']) ?></span>
                 </div>
+                <?php if (is_admin()): ?>
+                <div class="detail-item">
+                  <span class="detail-label">Preview</span>
+                  <span class="detail-value">
+                    <a href="?preview_id=<?= (int)$f['id'] ?>&<?= h($backParams) ?>"
+                       style="font-size:13px;font-weight:600;color:var(--accent,#2563eb);">
+                      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                           stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                           style="vertical-align:-2px;margin-right:3px;">
+                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                        <circle cx="12" cy="12" r="3"/>
+                      </svg>Prikaži sadržaj fajla
+                    </a>
+                  </span>
+                </div>
+                <?php endif; ?>
                 <div class="detail-item">
                   <span class="detail-label">Relative path</span>
                   <span class="detail-value mono"><?= h($f['relative_path']) ?></span>
