@@ -590,6 +590,184 @@ function integrity_ensure_tables(PDO $pdo): bool {
              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
         );
 
+        // Exclusion templates — v0.9.0
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS `scanner_integrity_exclusion_templates` (
+               `id`          INT          NOT NULL AUTO_INCREMENT,
+               `name`        VARCHAR(190) NOT NULL,
+               `description` TEXT         NULL,
+               `cms`         VARCHAR(100) NULL,
+               `active`      TINYINT(1)   NOT NULL DEFAULT 1,
+               `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               `updated_at`  DATETIME     NULL ON UPDATE CURRENT_TIMESTAMP,
+               PRIMARY KEY (`id`),
+               KEY `idx_active` (`active`)
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS `scanner_integrity_exclusion_template_items` (
+               `id`          INT           NOT NULL AUTO_INCREMENT,
+               `template_id` INT           NOT NULL,
+               `path`        VARCHAR(1024) NOT NULL,
+               `sort_order`  INT           NOT NULL DEFAULT 0,
+               PRIMARY KEY (`id`),
+               KEY `idx_template_id` (`template_id`)
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+
+        // Seed default Joomla 4 template if table was just created (no rows yet)
+        $existing = (int) $pdo->query('SELECT COUNT(*) FROM `scanner_integrity_exclusion_templates`')->fetchColumn();
+        if ($existing === 0) {
+            $pdo->exec(
+                "INSERT INTO `scanner_integrity_exclusion_templates` (`name`, `description`, `cms`, `active`)
+                 VALUES ('Joomla 4 production',
+                         'Standard exclusions for a Joomla 4 production site — extensions, templates, media, and runtime directories.',
+                         'Joomla', 1)"
+            );
+            $tplId = (int) $pdo->lastInsertId();
+            $joomla4Paths = [
+                'administrator/components/', 'administrator/modules/', 'administrator/templates/',
+                'administrator/manifests/packages/', 'administrator/manifests/libraries/',
+                'administrator/manifests/modules/', 'administrator/manifests/plugins/',
+                'administrator/language/', 'components/', 'modules/', 'plugins/', 'templates/',
+                'media/', 'images/', 'language/', 'cache/', 'tmp/', 'logs/',
+            ];
+            $sort = 1;
+            $stmt = $pdo->prepare(
+                'INSERT INTO `scanner_integrity_exclusion_template_items` (`template_id`, `path`, `sort_order`) VALUES (?, ?, ?)'
+            );
+            foreach ($joomla4Paths as $p) {
+                $stmt->execute([$tplId, $p, $sort++]);
+            }
+        }
+
+        return true;
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+// ── Exclusion templates ────────────────────────────────────────────────────────
+
+/**
+ * Returns all active (or all) exclusion templates with their paths.
+ * Each entry: ['id', 'name', 'description', 'cms', 'active', 'paths' => string[]].
+ */
+function integrity_load_exclusion_templates(PDO $pdo, bool $activeOnly = true): array {
+    try {
+        $sql   = 'SELECT * FROM `scanner_integrity_exclusion_templates`' . ($activeOnly ? ' WHERE active = 1' : '') . ' ORDER BY name';
+        $tmpls = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+        if (empty($tmpls)) return [];
+        $ids   = array_column($tmpls, 'id');
+        $in    = implode(',', array_fill(0, count($ids), '?'));
+        $items = $pdo->prepare("SELECT template_id, path FROM `scanner_integrity_exclusion_template_items` WHERE template_id IN ($in) ORDER BY sort_order, id");
+        $items->execute($ids);
+        $pathMap = [];
+        foreach ($items->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $pathMap[(int)$row['template_id']][] = $row['path'];
+        }
+        foreach ($tmpls as &$t) {
+            $t['paths'] = $pathMap[(int)$t['id']] ?? [];
+        }
+        unset($t);
+        return $tmpls;
+    } catch (PDOException $e) {
+        return [];
+    }
+}
+
+/**
+ * Saves a new exclusion template and its paths. Returns the new template ID (0 on error).
+ * $paths: array of normalized path strings (trailing slash, no traversal).
+ */
+function integrity_save_exclusion_template(PDO $pdo, string $name, string $description, string $cms, array $paths): int {
+    $name = trim($name);
+    if ($name === '' || empty($paths)) return 0;
+    try {
+        $stmt = $pdo->prepare(
+            'INSERT INTO `scanner_integrity_exclusion_templates` (`name`, `description`, `cms`) VALUES (?, ?, ?)'
+        );
+        $stmt->execute([$name, trim($description), trim($cms)]);
+        $tplId = (int) $pdo->lastInsertId();
+        $item  = $pdo->prepare(
+            'INSERT INTO `scanner_integrity_exclusion_template_items` (`template_id`, `path`, `sort_order`) VALUES (?, ?, ?)'
+        );
+        $sort = 1;
+        foreach ($paths as $p) {
+            $p = trim($p);
+            if ($p !== '') $item->execute([$tplId, $p, $sort++]);
+        }
+        return $tplId;
+    } catch (PDOException $e) {
+        return 0;
+    }
+}
+
+/**
+ * Loads a single template (with paths). Returns null if not found.
+ */
+function integrity_load_exclusion_template(PDO $pdo, int $id): ?array {
+    try {
+        $stmt = $pdo->prepare('SELECT * FROM `scanner_integrity_exclusion_templates` WHERE id = ?');
+        $stmt->execute([$id]);
+        $tpl = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$tpl) return null;
+        $stmt2 = $pdo->prepare(
+            'SELECT path FROM `scanner_integrity_exclusion_template_items` WHERE template_id = ? ORDER BY sort_order, id'
+        );
+        $stmt2->execute([$id]);
+        $tpl['paths'] = $stmt2->fetchAll(PDO::FETCH_COLUMN) ?: [];
+        return $tpl;
+    } catch (PDOException $e) {
+        return null;
+    }
+}
+
+/**
+ * Replaces all paths for an existing template and optionally updates name/desc/cms.
+ */
+function integrity_update_exclusion_template(PDO $pdo, int $id, string $name, string $description, string $cms, array $paths): bool {
+    $name = trim($name);
+    if ($name === '') return false;
+    try {
+        $pdo->prepare(
+            'UPDATE `scanner_integrity_exclusion_templates` SET name=?, description=?, cms=?, updated_at=NOW() WHERE id=?'
+        )->execute([trim($name), trim($description), trim($cms), $id]);
+        $pdo->prepare('DELETE FROM `scanner_integrity_exclusion_template_items` WHERE template_id = ?')->execute([$id]);
+        $item = $pdo->prepare(
+            'INSERT INTO `scanner_integrity_exclusion_template_items` (`template_id`, `path`, `sort_order`) VALUES (?, ?, ?)'
+        );
+        $sort = 1;
+        foreach ($paths as $p) {
+            $p = trim($p);
+            if ($p !== '') $item->execute([$id, $p, $sort++]);
+        }
+        return true;
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+/**
+ * Toggles active flag. Returns true on success.
+ */
+function integrity_toggle_exclusion_template(PDO $pdo, int $id, bool $active): bool {
+    try {
+        return (bool) $pdo->prepare(
+            'UPDATE `scanner_integrity_exclusion_templates` SET active=?, updated_at=NOW() WHERE id=?'
+        )->execute([(int)$active, $id]);
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+/**
+ * Deletes a template and its items.
+ */
+function integrity_delete_exclusion_template(PDO $pdo, int $id): bool {
+    try {
+        $pdo->prepare('DELETE FROM `scanner_integrity_exclusion_template_items` WHERE template_id = ?')->execute([$id]);
+        $pdo->prepare('DELETE FROM `scanner_integrity_exclusion_templates` WHERE id = ?')->execute([$id]);
         return true;
     } catch (PDOException $e) {
         return false;

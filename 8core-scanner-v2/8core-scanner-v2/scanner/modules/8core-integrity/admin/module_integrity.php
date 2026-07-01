@@ -30,6 +30,8 @@ $_intCheckOrigin  = '';
 $_intCheckDest    = '';
 $_intDetSoftware  = '';     // detected software name (passed through forms)
 $_intScanExcl     = '';     // raw textarea text for scan exclusions (repopulated on error)
+$_intExclTemplates = [];   // loaded from DB for dropdown/manage UI
+$_intTplManageId   = 0;    // template being edited in Manage view (0 = none)
 
 // ── Flash message helpers ──────────────────────────────────────────────────────
 
@@ -736,6 +738,88 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         echo json_encode($result);
         exit;
     }
+
+    // ── Save exclusion template ────────────────────────────────────────────────
+    if ($postAction === 'save_excl_template') {
+        $tplName  = trim($_POST['tpl_name']  ?? '');
+        $tplDesc  = trim($_POST['tpl_desc']  ?? '');
+        $tplCms   = trim($_POST['tpl_cms']   ?? '');
+        $tplPaths = trim($_POST['tpl_paths'] ?? '');
+
+        if ($tplName === '') {
+            _int_flash_set('err', 'Template name is required.');
+        } elseif ($tplPaths === '') {
+            _int_flash_set('err', 'Template must have at least one path.');
+        } else {
+            // Reuse integrity_parse_scan_exclusions without a destRoot (relative paths only)
+            $parsed = [];
+            foreach (explode("\n", str_replace("\r", "\n", $tplPaths)) as $line) {
+                $line = trim($line, " \t/\r");
+                if ($line === '' || str_contains($line, '..') || str_contains($line, "\0")) continue;
+                $parsed[] = $line . '/';
+            }
+            $parsed = array_values(array_unique($parsed));
+            if (empty($parsed)) {
+                _int_flash_set('err', 'No valid paths found after normalization.');
+            } else {
+                $newId = integrity_save_exclusion_template($pdo, $tplName, $tplDesc, $tplCms, $parsed);
+                if ($newId > 0) {
+                    _int_flash_set('ok', 'Template "' . $tplName . '" saved with ' . count($parsed) . ' path(s).');
+                } else {
+                    _int_flash_set('err', 'Failed to save template.');
+                }
+            }
+        }
+        header('Location: module.php?module=8core-integrity&page=module_integrity&tab=check');
+        exit;
+    }
+
+    // ── Update exclusion template (from Manage view) ───────────────────────────
+    if ($postAction === 'update_excl_template') {
+        $tplId    = (int) ($_POST['tpl_id']    ?? 0);
+        $tplName  = trim($_POST['tpl_name']    ?? '');
+        $tplDesc  = trim($_POST['tpl_desc']    ?? '');
+        $tplCms   = trim($_POST['tpl_cms']     ?? '');
+        $tplPaths = trim($_POST['tpl_paths']   ?? '');
+
+        if ($tplId <= 0 || $tplName === '') {
+            _int_flash_set('err', 'Invalid template or missing name.');
+        } else {
+            $parsed = [];
+            foreach (explode("\n", str_replace("\r", "\n", $tplPaths)) as $line) {
+                $line = trim($line, " \t/\r");
+                if ($line === '' || str_contains($line, '..') || str_contains($line, "\0")) continue;
+                $parsed[] = $line . '/';
+            }
+            $parsed = array_values(array_unique($parsed));
+            $ok = integrity_update_exclusion_template($pdo, $tplId, $tplName, $tplDesc, $tplCms, $parsed);
+            _int_flash_set($ok ? 'ok' : 'err', $ok ? 'Template updated.' : 'Failed to update template.');
+        }
+        header('Location: module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1');
+        exit;
+    }
+
+    // ── Toggle / delete exclusion template ────────────────────────────────────
+    if ($postAction === 'toggle_excl_template') {
+        $tplId  = (int) ($_POST['tpl_id']    ?? 0);
+        $active = (int) ($_POST['tpl_active'] ?? 1);
+        if ($tplId > 0) {
+            $ok = integrity_toggle_exclusion_template($pdo, $tplId, (bool)$active);
+            _int_flash_set($ok ? 'ok' : 'err', $ok ? ($active ? 'Template enabled.' : 'Template disabled.') : 'Failed.');
+        }
+        header('Location: module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1');
+        exit;
+    }
+
+    if ($postAction === 'delete_excl_template') {
+        $tplId = (int) ($_POST['tpl_id'] ?? 0);
+        if ($tplId > 0) {
+            $ok = integrity_delete_exclusion_template($pdo, $tplId);
+            _int_flash_set($ok ? 'ok' : 'err', $ok ? 'Template deleted.' : 'Failed to delete template.');
+        }
+        header('Location: module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1');
+        exit;
+    }
 }
 
 /**
@@ -806,6 +890,15 @@ foreach ($_intExtraApps as $ea) {
     $_intAllAppKeys[] = $ea;
 }
 
+// Load exclusion templates (all, including inactive, for Manage; active-only for dropdown)
+$_intExclTemplates    = integrity_load_exclusion_templates($pdo, false); // all for manage
+$_intExclTplsActive   = array_values(array_filter($_intExclTemplates, fn($t) => $t['active']));
+// Template being edited in Manage view
+$_intTplManageId      = (int) ($_GET['tpl_edit'] ?? 0);
+$_intTplManageData    = ($_intTplManageId > 0) ? integrity_load_exclusion_template($pdo, $_intTplManageId) : null;
+// Whether to scroll Repo tab to template section
+$_intShowTplSection   = isset($_GET['tpl_section']);
+
 // Drain flash messages
 foreach (_int_flash_drain() as $fm) {
     $_intMessages[] = $fm;
@@ -842,6 +935,8 @@ if (!isset($_intBulkConfirm) || $_intBulkConfirm === null) {
 // ── Tab routing ────────────────────────────────────────────────────────────────
 $_intTabBase    = 'module.php?module=8core-integrity&page=module_integrity';
 $_rawTab        = trim($_GET['tab'] ?? '');
+// tpl_section always opens the repo tab (template management section)
+if ($_intShowTplSection) $_rawTab = 'repo';
 $_intActiveTab  = match($_rawTab) {
     'repo', 'check' => $_rawTab,
     default => !empty($_intAllImported) ? 'check' : 'repo',
@@ -1094,6 +1189,43 @@ require __DIR__ . '/../../../includes/version.php';
 .int-excl-section { margin-top:14px; padding:14px 16px; background:#f8fafc; border:1px solid var(--border); border-radius:8px; }
 .int-excl-section-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-muted); margin-bottom:8px; display:flex; align-items:center; gap:8px; }
 .int-excl-section-title span { font-size:10px; font-weight:400; letter-spacing:0; text-transform:none; color:#64748b; }
+
+/* ── Template toolbar ── */
+.int-excl-tpl-bar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px; padding:8px 10px; background:#fff; border:1px solid var(--border); border-radius:6px; }
+.int-excl-tpl-bar label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); white-space:nowrap; }
+.int-excl-tpl-select { padding:5px 8px; font-size:12px; border:1px solid var(--border); border-radius:5px; background:#fff; color:var(--text); outline:none; flex:1; min-width:160px; max-width:320px; }
+.int-excl-tpl-select:focus { border-color:#2563eb; }
+.int-excl-tpl-sep { border-left:1px solid var(--border); height:20px; align-self:center; }
+
+/* ── Save-as-template inline form ── */
+.int-excl-save-form { margin-top:10px; padding:12px 14px; background:#fff; border:1px dashed var(--border); border-radius:7px; display:none; }
+.int-excl-save-form.is-open { display:block; }
+.int-excl-save-form-title { font-size:11px; font-weight:700; color:var(--text); margin-bottom:10px; }
+.int-excl-save-row { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end; }
+.int-excl-save-field { display:flex; flex-direction:column; gap:3px; }
+.int-excl-save-field label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); }
+.int-excl-save-field input[type=text] { padding:6px 9px; border:1px solid var(--border); border-radius:5px; font-size:12px; background:#fff; color:var(--text); width:180px; outline:none; }
+.int-excl-save-field input[type=text]:focus { border-color:#2563eb; }
+
+/* ── Template manage table ── */
+.int-tpl-table { width:100%; border-collapse:collapse; font-size:12px; }
+.int-tpl-table th { text-align:left; padding:7px 12px; border-bottom:2px solid var(--border); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-muted); background:var(--surface2); }
+.int-tpl-table td { padding:8px 12px; border-bottom:1px solid var(--border); vertical-align:middle; }
+.int-tpl-table tr:last-child td { border-bottom:none; }
+.int-tpl-paths-preview { font-family:var(--font-mono,monospace); font-size:11px; color:var(--text-muted); max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.int-tpl-active-badge { display:inline-block; padding:2px 7px; border-radius:4px; font-size:10px; font-weight:700; }
+.int-tpl-active-badge.on  { background:#dcfce7; color:#166534; }
+.int-tpl-active-badge.off { background:#f1f5f9; color:#64748b; }
+
+/* ── Edit template form ── */
+.int-tpl-edit-box { background:#f8fafc; border:1px solid var(--border); border-radius:8px; padding:16px 18px; margin-bottom:16px; }
+.int-tpl-edit-title { font-size:13px; font-weight:700; color:var(--text); margin-bottom:12px; }
+.int-tpl-edit-grid { display:grid; grid-template-columns:1fr 1fr 120px; gap:10px; margin-bottom:10px; }
+.int-tpl-edit-grid label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); display:block; margin-bottom:3px; }
+.int-tpl-edit-grid input[type=text] { width:100%; box-sizing:border-box; padding:7px 9px; border:1px solid var(--border); border-radius:5px; font-size:12px; color:var(--text); background:#fff; outline:none; }
+.int-tpl-edit-grid input[type=text]:focus { border-color:#2563eb; }
+.int-tpl-edit-paths { width:100%; box-sizing:border-box; padding:8px 10px; font-family:var(--font-mono,monospace); font-size:12px; border:1px solid var(--border); border-radius:6px; color:var(--text); background:#fff; resize:vertical; min-height:160px; outline:none; margin-bottom:10px; }
+.int-tpl-edit-paths:focus { border-color:#2563eb; }
 .int-excl-textarea { width:100%; box-sizing:border-box; padding:9px 11px; font-family:var(--font-mono,monospace); font-size:12px; background:#fff; border:1px solid var(--border); border-radius:6px; color:var(--text); resize:vertical; min-height:88px; outline:none; transition:border-color .13s; }
 .int-excl-textarea:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.15); }
 .int-excl-hint { font-size:11px; color:var(--text-muted); margin-top:5px; line-height:1.5; }
@@ -1158,7 +1290,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   <div class="topbar">
     <div class="topbar-title">8Core Integrity</div>
     <div class="topbar-meta">
-      <span style="font-size:12px;color:var(--text-muted);">v0.8.0</span>
+      <span style="font-size:12px;color:var(--text-muted);">v0.9.0</span>
       &nbsp;&nbsp;<a href="../logout.php" style="color:var(--text-muted);font-size:12px;">Odjava</a>
     </div>
   </div>
@@ -1564,6 +1696,134 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
     </div>
     <?php endif; ?>
 
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- ── Section: Exclusion Templates ── -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div class="int-section" id="int-tpl-section"<?= $_intShowTplSection ? '' : '' ?>>
+      <div class="int-section-header" style="justify-content:space-between;">
+        <h3>Exclusion Templates</h3>
+        <?php if ($_intTplManageData): ?>
+        <a href="module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1"
+           class="btn btn-ghost" style="font-size:11px;padding:4px 10px;">&larr; Back to list</a>
+        <?php endif; ?>
+      </div>
+      <hr class="int-divider">
+      <div class="int-body">
+        <p style="margin:0 0 14px;font-size:12px;color:var(--text-muted);">
+          Templates store sets of scan exclusion paths that can be applied to the Integrity Check form in one click.
+          They do not affect the malware scanner, global ignores, or quarantine.
+        </p>
+
+        <?php if ($_intTplManageData): $__ted = $_intTplManageData; ?>
+        <!-- ── Edit template ── -->
+        <div class="int-tpl-edit-box">
+          <div class="int-tpl-edit-title">Edit template: <?= h($__ted['name']) ?></div>
+          <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
+            <input type="hidden" name="action"  value="update_excl_template">
+            <input type="hidden" name="tpl_id"  value="<?= (int)$__ted['id'] ?>">
+            <?= csrf_field() ?>
+            <div class="int-tpl-edit-grid">
+              <div>
+                <label>Name *</label>
+                <input type="text" name="tpl_name" required value="<?= h($__ted['name']) ?>" maxlength="190">
+              </div>
+              <div>
+                <label>Description</label>
+                <input type="text" name="tpl_desc" value="<?= h($__ted['description'] ?? '') ?>" maxlength="255">
+              </div>
+              <div>
+                <label>CMS</label>
+                <input type="text" name="tpl_cms" value="<?= h($__ted['cms'] ?? '') ?>" maxlength="100">
+              </div>
+            </div>
+            <label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);display:block;margin-bottom:4px;">Paths (one per line)</label>
+            <textarea name="tpl_paths" class="int-tpl-edit-paths"><?= h(implode("\n", $__ted['paths'])) ?></textarea>
+            <div style="display:flex;gap:8px;">
+              <button type="submit" class="btn btn-primary" style="font-size:12px;">Save changes</button>
+              <a href="module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1"
+                 class="btn btn-ghost" style="font-size:12px;">Cancel</a>
+            </div>
+          </form>
+        </div>
+
+        <?php else: ?>
+        <!-- ── Template list ── -->
+        <?php if (empty($_intExclTemplates)): ?>
+        <div class="int-placeholder">No exclusion templates yet. Create one from the Integrity Check tab using &ldquo;Save current as template&rdquo;.</div>
+        <?php else: ?>
+        <div class="int-results-wrap" style="margin-bottom:16px;">
+          <table class="int-tpl-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>CMS</th>
+                <th>Paths preview</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach ($_intExclTemplates as $__t): ?>
+              <tr>
+                <td>
+                  <strong style="font-size:12px;"><?= h($__t['name']) ?></strong>
+                  <?php if (!empty($__t['description'])): ?>
+                  <div style="font-size:11px;color:var(--text-muted);margin-top:1px;"><?= h($__t['description']) ?></div>
+                  <?php endif; ?>
+                </td>
+                <td style="font-size:12px;color:var(--text-muted);"><?= h($__t['cms'] ?? '—') ?></td>
+                <td>
+                  <div class="int-tpl-paths-preview" title="<?= h(implode("\n", $__t['paths'])) ?>">
+                    <?= h(implode(', ', array_slice($__t['paths'], 0, 4))) ?>
+                    <?php if (count($__t['paths']) > 4): ?>
+                    <span style="color:#94a3b8;">&hellip; +<?= count($__t['paths']) - 4 ?> more</span>
+                    <?php endif; ?>
+                  </div>
+                </td>
+                <td>
+                  <span class="int-tpl-active-badge <?= $__t['active'] ? 'on' : 'off' ?>">
+                    <?= $__t['active'] ? 'Active' : 'Disabled' ?>
+                  </span>
+                </td>
+                <td style="text-align:right;">
+                  <div style="display:flex;gap:5px;justify-content:flex-end;flex-wrap:wrap;">
+                    <!-- Edit -->
+                    <a href="module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1&tpl_edit=<?= (int)$__t['id'] ?>"
+                       class="btn btn-ghost" style="font-size:11px;padding:3px 8px;">Edit</a>
+                    <!-- Toggle active -->
+                    <form method="post" action="module.php?module=8core-integrity&page=module_integrity" style="display:inline">
+                      <input type="hidden" name="action"     value="toggle_excl_template">
+                      <input type="hidden" name="tpl_id"     value="<?= (int)$__t['id'] ?>">
+                      <input type="hidden" name="tpl_active" value="<?= $__t['active'] ? '0' : '1' ?>">
+                      <?= csrf_field() ?>
+                      <button type="submit" class="btn btn-ghost" style="font-size:11px;padding:3px 8px;">
+                        <?= $__t['active'] ? 'Disable' : 'Enable' ?>
+                      </button>
+                    </form>
+                    <!-- Delete -->
+                    <form method="post" action="module.php?module=8core-integrity&page=module_integrity" style="display:inline">
+                      <input type="hidden" name="action" value="delete_excl_template">
+                      <input type="hidden" name="tpl_id" value="<?= (int)$__t['id'] ?>">
+                      <?= csrf_field() ?>
+                      <button type="submit" class="btn btn-ghost"
+                              style="font-size:11px;padding:3px 8px;color:#dc2626;border-color:#fca5a5;"
+                              onclick="return confirm('Delete template &quot;<?= h(addslashes($__t['name'])) ?>&quot;? This cannot be undone.')">
+                        Delete
+                      </button>
+                    </form>
+                  </div>
+                </td>
+              </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        </div>
+        <?php endif; ?>
+        <?php endif; ?>
+
+      </div>
+    </div>
+
     </div><!-- /#int-tab-repo -->
 
     <!-- ── Tab panel: Integrity Check ────────────────────────────────────── -->
@@ -1650,12 +1910,81 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               Scan exclusions
               <span>— these paths are excluded during structural comparison, not just filtered from the view</span>
             </div>
-            <textarea name="scan_exclusions" class="int-excl-textarea"
+
+            <?php if (!empty($_intExclTplsActive)): ?>
+            <!-- Template toolbar -->
+            <div class="int-excl-tpl-bar">
+              <label>Template</label>
+              <select id="int-excl-tpl-select" class="int-excl-tpl-select">
+                <option value="">— select exclusion template —</option>
+                <?php foreach ($_intExclTplsActive as $__tpl): ?>
+                <option value="<?= (int)$__tpl['id'] ?>"
+                        data-paths="<?= h(implode("\n", $__tpl['paths'])) ?>"
+                        <?= $__tpl['cms'] ? 'data-cms="' . h($__tpl['cms']) . '"' : '' ?>>
+                  <?= h($__tpl['name']) ?><?= $__tpl['cms'] ? ' (' . h($__tpl['cms']) . ')' : '' ?>
+                </option>
+                <?php endforeach; ?>
+              </select>
+              <button type="button" class="btn btn-ghost" id="int-excl-tpl-apply"
+                      style="font-size:12px;padding:5px 12px;" title="Paste template paths into the textarea below">
+                Apply template
+              </button>
+              <div class="int-excl-tpl-sep"></div>
+              <a href="module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1"
+                 class="btn btn-ghost" style="font-size:12px;padding:5px 12px;">Manage templates</a>
+            </div>
+            <?php else: ?>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">
+              No active templates.
+              <a href="module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1"
+                 style="color:#2563eb;">Manage templates</a>
+            </div>
+            <?php endif; ?>
+
+            <textarea name="scan_exclusions" id="int-excl-textarea" class="int-excl-textarea"
                       placeholder="administrator/components/&#10;plugins/&#10;templates/&#10;media/"><?= h($_intScanExcl) ?></textarea>
             <div class="int-excl-hint">
               One path per line. Relative to the Destination root, or absolute (auto-stripped to relative).
               Entire subtrees are excluded — e.g. <code>administrator/components/</code> excludes all extensions.
               Malware scanner runs independently and is NOT affected by these exclusions.
+            </div>
+
+            <!-- Save current as new template -->
+            <div style="margin-top:8px;">
+              <button type="button" class="btn btn-ghost" id="int-excl-save-toggle"
+                      style="font-size:11px;padding:4px 10px;">Save current as template&hellip;</button>
+            </div>
+            <div class="int-excl-save-form" id="int-excl-save-form">
+              <div class="int-excl-save-form-title">Save exclusions as new template</div>
+              <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
+                <input type="hidden" name="action" value="save_excl_template">
+                <?= csrf_field() ?>
+                <div class="int-excl-save-row">
+                  <div class="int-excl-save-field">
+                    <label>Template name *</label>
+                    <input type="text" name="tpl_name" required placeholder="Joomla 4 production" maxlength="190">
+                  </div>
+                  <div class="int-excl-save-field">
+                    <label>CMS (optional)</label>
+                    <input type="text" name="tpl_cms" placeholder="Joomla" maxlength="100" style="width:120px;">
+                  </div>
+                  <div class="int-excl-save-field">
+                    <label>Description (optional)</label>
+                    <input type="text" name="tpl_desc" placeholder="Short description" maxlength="255" style="width:220px;">
+                  </div>
+                </div>
+                <input type="hidden" name="tpl_paths" id="int-excl-save-paths">
+                <div style="margin-top:10px;display:flex;gap:8px;">
+                  <button type="submit" class="btn btn-primary" style="font-size:12px;padding:6px 14px;"
+                          onclick="document.getElementById('int-excl-save-paths').value=document.getElementById('int-excl-textarea').value;">
+                    Save template
+                  </button>
+                  <button type="button" class="btn btn-ghost" style="font-size:12px;padding:6px 12px;"
+                          onclick="document.getElementById('int-excl-save-form').classList.remove('is-open');">
+                    Cancel
+                  </button>
+                </div>
+              </form>
             </div>
           </div>
 
@@ -2556,6 +2885,30 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   });
 
   updateCount();
+})();
+
+// Exclusion template apply
+(function () {
+  var tplSelect  = document.getElementById('int-excl-tpl-select');
+  var tplApply   = document.getElementById('int-excl-tpl-apply');
+  var exclArea   = document.getElementById('int-excl-textarea');
+  var saveToggle = document.getElementById('int-excl-save-toggle');
+  var saveForm   = document.getElementById('int-excl-save-form');
+
+  if (tplApply && tplSelect && exclArea) {
+    tplApply.addEventListener('click', function () {
+      var opt = tplSelect.options[tplSelect.selectedIndex];
+      if (!opt || !opt.value) { alert('Select a template first.'); return; }
+      exclArea.value = opt.dataset.paths || '';
+      exclArea.focus();
+    });
+  }
+
+  if (saveToggle && saveForm) {
+    saveToggle.addEventListener('click', function () {
+      saveForm.classList.toggle('is-open');
+    });
+  }
 })();
 </script>
 </body>

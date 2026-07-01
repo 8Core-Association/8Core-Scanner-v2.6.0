@@ -1,6 +1,40 @@
 # 8Core Integrity — Changelog
 
-## [0.8.1] — 2026-07-01
+## [0.9.0] — 2026-07-01
+
+### Added
+
+- `install/migrations/20260701_011_add_exclusion_templates.sql`: creates `scanner_integrity_exclusion_templates` (id, name, description, cms, active, created_at, updated_at) and `scanner_integrity_exclusion_template_items` (id, template_id, path, sort_order) tables; seeds default "Joomla 4 production" template with 18 standard exclusion paths
+- `includes/integrity.php` — `integrity_load_exclusion_templates(PDO $pdo, bool $activeOnly = true): array`: loads templates with their path items; each entry includes `id`, `name`, `description`, `cms`, `active`, `paths` (flat array)
+- `includes/integrity.php` — `integrity_save_exclusion_template(PDO $pdo, string $name, string $description, string $cms, array $paths): int`: inserts a new template + items, returns new template id
+- `includes/integrity.php` — `integrity_load_exclusion_template(PDO $pdo, int $id): ?array`: loads a single template with its paths for the edit form
+- `includes/integrity.php` — `integrity_update_exclusion_template(PDO $pdo, int $id, string $name, string $description, string $cms, array $paths): bool`: replaces all items for a template and updates metadata
+- `includes/integrity.php` — `integrity_toggle_exclusion_template(PDO $pdo, int $id, bool $active): bool`: enables or disables a template
+- `includes/integrity.php` — `integrity_delete_exclusion_template(PDO $pdo, int $id): bool`: deletes a template and all its items
+- `includes/integrity.php` — `integrity_ensure_tables()` now also creates both exclusion template tables and seeds the default Joomla 4 production template on first install (checked with COUNT query to avoid re-seeding)
+- `admin/module_integrity.php` — `save_excl_template` POST handler: normalizes paths (strips leading/trailing slashes, adds trailing `/`), validates required name, calls `integrity_save_exclusion_template()`
+- `admin/module_integrity.php` — `update_excl_template` POST handler: same path normalization, calls `integrity_update_exclusion_template()`; redirects back to manage section
+- `admin/module_integrity.php` — `toggle_excl_template` POST handler: calls `integrity_toggle_exclusion_template()`; redirects to manage section
+- `admin/module_integrity.php` — `delete_excl_template` POST handler: calls `integrity_delete_exclusion_template()`; redirects to manage section
+- `admin/module_integrity.php` — Scan exclusions section: template toolbar showing a dropdown of active templates, an **Apply template** button (JS, no page reload), and a **Manage templates** link
+- `admin/module_integrity.php` — Scan exclusions section: **Save as template** toggle button opens an inline form with name, CMS, and description fields; hidden `tpl_paths` input is populated from the textarea on submit via `onclick`
+- `admin/module_integrity.php` — Repo tab: **Exclusion Templates** section (visible when `?tpl_section=1`) — table listing all templates (name, CMS, description, status, actions), per-row Edit / Enable-Disable / Delete actions, inline edit form (name, CMS, description, paths textarea), empty-state placeholder
+- `admin/module_integrity.php` — JS: Apply template click reads `data-paths` from the selected `<option>` and sets the exclusions textarea; Save toggle click toggles `is-open` class on the save form
+- `admin/module_integrity.php` — Tab routing: `?tpl_section=1` query param forces the Repo tab to be active
+
+### Changed
+
+- `module.php` — version bumped to `0.9.0`
+- `admin/module_integrity.php` — version display updated to `v0.9.0`
+
+### Notes
+
+- Exclusion templates are completely isolated from global ignores (`scanner_integrity_ignores`), malware scanner rules, quarantine, and IOC engine
+- Applying a template populates the scan exclusions textarea only — it does not auto-run a check
+- The actual exclusion paths used for each run are still stored in `scanner_integrity_runs.scan_exclusions` as before
+
+
+
 
 ### Fixed
 
