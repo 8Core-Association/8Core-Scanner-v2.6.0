@@ -1900,45 +1900,165 @@ function integrity_log_write(string $path, string $line): void {
 }
 
 /**
- * Writes a complete run log file.
+ * Loads all results for a run, ordered by severity then relative_path.
+ */
+function integrity_load_run_results(PDO $pdo, int $runId): array {
+    try {
+        $stmt = $pdo->prepare(
+            "SELECT * FROM scanner_integrity_results
+              WHERE run_id = :rid
+              ORDER BY FIELD(severity,'suspicious','warning','info'), type, relative_path"
+        );
+        $stmt->execute([':rid' => $runId]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        return [];
+    }
+}
+
+/**
+ * Writes a complete run log file including grouped per-result detail.
  */
 function integrity_write_run_log(int $runId, array $data): void {
-    $path = integrity_run_log_path($runId);
+    $path      = integrity_run_log_path($runId);
+    $results   = $data['results']   ?? [];
+    $duration  = isset($data['duration_sec']) ? round((float)$data['duration_sec'], 2) . 's' : '—';
+    $excls     = $data['exclusions'] ?? [];
+
     $lines = [
         '8Core Integrity — Run Log',
         str_repeat('=', 60),
         'Run ID    : ' . $runId,
-        'Started   : ' . ($data['started_at'] ?? date('Y-m-d H:i:s')),
+        'Log file  : ' . $path,
+        'Started   : ' . ($data['started_at']  ?? date('Y-m-d H:i:s')),
         'Finished  : ' . ($data['finished_at'] ?? date('Y-m-d H:i:s')),
-        'Mode      : ' . ($data['mode'] ?? 'structural'),
-        'Origin    : ' . ($data['origin'] ?? ''),
-        'Dest      : ' . ($data['dest'] ?? ''),
+        'Duration  : ' . $duration,
+        'Mode      : ' . ($data['mode']     ?? 'structural'),
+        'Origin    : ' . ($data['origin']   ?? ''),
+        'Dest      : ' . ($data['dest']     ?? ''),
         'Software  : ' . ($data['software'] ?? ''),
         '',
-        'Exclusions (' . count($data['exclusions'] ?? []) . '):',
     ];
-    foreach ($data['exclusions'] ?? [] as $excl) {
-        $lines[] = '  ' . $excl;
+
+    // Exclusions
+    $lines[] = 'Exclusions (' . count($excls) . '):';
+    if (empty($excls)) {
+        $lines[] = '  (none)';
+    } else {
+        foreach ($excls as $excl) {
+            $lines[] = '  ' . $excl;
+        }
     }
     $lines[] = '';
+
+    // Counts
     $lines[] = 'Counts:';
     foreach ($data['counts'] ?? [] as $k => $v) {
         $lines[] = '  ' . str_pad($k, 18) . ': ' . $v;
     }
     $lines[] = '';
-    $lines[] = 'Summary:';
-    foreach ($data['summary'] ?? [] as $k => $v) {
-        $lines[] = '  ' . str_pad($k, 22) . ': ' . $v;
-    }
-    if (!empty($data['errors'])) {
+
+    // Summary
+    if (!empty($data['summary'])) {
+        $lines[] = 'Summary:';
+        foreach ($data['summary'] as $k => $v) {
+            $lines[] = '  ' . str_pad($k, 22) . ': ' . $v;
+        }
         $lines[] = '';
+    }
+
+    // DB result count
+    $lines[] = 'DB results inserted: ' . count($results);
+    $lines[] = '';
+
+    // Errors
+    if (!empty($data['errors'])) {
         $lines[] = 'Errors:';
         foreach ((array) $data['errors'] as $e) {
             $lines[] = '  [ERROR] ' . $e;
         }
+        $lines[] = '';
     }
-    $lines[] = '';
-    $lines[] = str_repeat('-', 60);
+
+    // Per-result detail grouped by type category
+    if (!empty($results)) {
+        $groups = [
+            'suspicious'          => [],
+            'MODIFIED_FILE'       => [],
+            'MISSING_FILE'        => [],
+            'MISSING_DIRECTORY'   => [],
+            'EXTRA_FILE'          => [],
+            'EXTRA_DIRECTORY'     => [],
+            'USER_CONTENT_FOLDER' => [],
+            'info'                => [],
+        ];
+
+        foreach ($results as $r) {
+            $t = $r['type'] ?? '';
+            $s = $r['severity'] ?? 'info';
+            if ($s === 'suspicious') {
+                $groups['suspicious'][] = $r;
+            } elseif (isset($groups[$t])) {
+                $groups[$t][] = $r;
+            } else {
+                $groups['info'][] = $r;
+            }
+        }
+
+        $groupLabels = [
+            'suspicious'          => 'SUSPICIOUS',
+            'MODIFIED_FILE'       => 'MODIFIED FILES',
+            'MISSING_FILE'        => 'MISSING FILES',
+            'MISSING_DIRECTORY'   => 'MISSING DIRECTORIES',
+            'EXTRA_FILE'          => 'EXTRA FILES',
+            'EXTRA_DIRECTORY'     => 'EXTRA DIRECTORIES',
+            'USER_CONTENT_FOLDER' => 'USER CONTENT FOLDERS',
+            'info'                => 'INFO',
+        ];
+
+        $lines[] = str_repeat('-', 60);
+        $lines[] = 'RESULTS BY GROUP';
+        $lines[] = str_repeat('-', 60);
+
+        foreach ($groups as $key => $rows) {
+            if (empty($rows)) continue;
+            $lines[] = '';
+            $lines[] = '[' . ($groupLabels[$key] ?? strtoupper($key)) . '] — ' . count($rows) . ' item(s)';
+            $lines[] = str_repeat('·', 40);
+            foreach ($rows as $r) {
+                $rid    = isset($r['id'])       ? '#' . $r['id']    : '#?';
+                $sev    = strtoupper($r['severity']    ?? '');
+                $type   = $r['type']            ?? '';
+                $status = $r['status']          ?? 'new';
+                $rel    = $r['relative_path']   ?? '';
+                $full   = $r['full_path']       ?? '';
+                $rsha   = $r['repo_sha256']         ?? null;
+                $dsha   = $r['destination_sha256']  ?? null;
+                $note   = $r['note']            ?? '';
+
+                $lines[] = $rid . ' ' . $sev . ' ' . $status . '  ' . $rel;
+                if ($type !== ($key === 'suspicious' ? '' : $key)) {
+                    $lines[] = '  type      : ' . $type;
+                }
+                if ($full !== '') {
+                    $lines[] = '  full      : ' . $full;
+                }
+                if ($rsha !== null) {
+                    $lines[] = '  repo_sha  : ' . $rsha;
+                }
+                if ($dsha !== null) {
+                    $lines[] = '  dest_sha  : ' . $dsha;
+                }
+                if ($note !== '' && !preg_match('/^action_id:\d+$/', $note)) {
+                    $lines[] = '  note      : ' . $note;
+                }
+                $lines[] = '';
+            }
+        }
+    }
+
+    $lines[] = str_repeat('=', 60);
+    $lines[] = 'END OF LOG';
 
     $dir = dirname($path);
     if (!is_dir($dir)) @mkdir($dir, 0755, true);

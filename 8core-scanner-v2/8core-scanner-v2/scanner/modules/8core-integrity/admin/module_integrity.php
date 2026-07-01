@@ -515,8 +515,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             if ($__useHash) {
+                $_intRunStart = microtime(true);
                 $result = integrity_hash_check($pdo, $__repoKey, $_intCheckOrigin, $_intCheckDest, $_intDetSoftware, $combinedIgnores);
             } else {
+                $_intRunStart = microtime(true);
                 $result = integrity_structural_check($_intCheckOrigin, $_intCheckDest, $_intDetSoftware, $combinedIgnores);
             }
 
@@ -528,18 +530,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $runId = integrity_save_run($pdo, $result['origin'], $result['dest'], $_intDetSoftware, $result['counts'], $preRunExclusions, $checkMode, $summary);
                 if ($runId > 0) {
                     integrity_save_results($pdo, $runId, $result['origin'], $result['dest'], $result['findings']);
+                    // Load saved results from DB (includes result IDs and statuses)
+                    $savedResults = integrity_load_run_results($pdo, $runId);
                     // Write run log
                     integrity_write_run_log($runId, [
-                        'started_at'  => $_SESSION['8int_check_debug']['ts'] ?? date('H:i:s'),
-                        'finished_at' => date('Y-m-d H:i:s'),
-                        'mode'        => $checkMode,
-                        'origin'      => $result['origin'],
-                        'dest'        => $result['dest'],
-                        'software'    => $_intDetSoftware,
-                        'exclusions'  => $preRunExclusions,
-                        'counts'      => $result['counts'],
-                        'summary'     => $summary,
-                        'errors'      => [],
+                        'started_at'   => date('Y-m-d H:i:s', (int)($_intRunStart ?? time())),
+                        'finished_at'  => date('Y-m-d H:i:s'),
+                        'duration_sec' => isset($_intRunStart) ? microtime(true) - $_intRunStart : null,
+                        'mode'         => $checkMode,
+                        'origin'       => $result['origin'],
+                        'dest'         => $result['dest'],
+                        'software'     => $_intDetSoftware,
+                        'exclusions'   => $preRunExclusions,
+                        'counts'       => $result['counts'],
+                        'summary'      => $summary,
+                        'errors'       => [],
+                        'results'      => $savedResults,
                     ]);
                     $modeLabel = ($checkMode === 'hash') ? 'Hash check' : 'Structural check';
                     _int_flash_set('ok', $modeLabel . ' complete. '
