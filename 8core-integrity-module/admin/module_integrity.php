@@ -27,6 +27,7 @@ $_intRunResults   = null;   // array of result rows from DB (null = not loaded)
 $_intRunFilters   = [];     // active filter values [type, severity, status, path, ids, all_runs]
 $_intDeepResultId = 0;      // result_id from deep-link ?result_id=N (0 = none)
 $_intRunsForDest  = [];     // all runs for current destination (for run selector dropdown)
+$_intResultsError = null;   // PDO error message from integrity_load_results(), null = no error
 $_intBulkConfirm  = null;   // bulk preview data before destructive execute
 $_intCheckOrigin  = '';
 $_intCheckDest    = '';
@@ -1235,7 +1236,7 @@ if (!isset($_intBulkConfirm) || $_intBulkConfirm === null) {
         $_intRunMeta    = integrity_load_run($pdo, $_intRunId);
         $_intRunFilters = _int_filters_from_get();
         if ($_intRunMeta) {
-            $_intRunResults  = integrity_load_results($pdo, $_intRunId, $_intRunFilters);
+            $_intRunResults  = integrity_load_results($pdo, $_intRunId, $_intRunFilters, $_intResultsError);
             $_intCheckOrigin = $_intRunMeta['origin_path'];
             $_intCheckDest   = $_intRunMeta['destination_path'];
             $_intDetSoftware = $_intRunMeta['software'] ?? '';
@@ -1244,7 +1245,7 @@ if (!isset($_intBulkConfirm) || $_intBulkConfirm === null) {
     } elseif (!empty($_GET['fi']) || !empty($_GET['fall'])) {
         // all_runs ID search with no run_id
         $_intRunFilters = _int_filters_from_get();
-        $_intRunResults = integrity_load_results($pdo, 0, $_intRunFilters);
+        $_intRunResults = integrity_load_results($pdo, 0, $_intRunFilters, $_intResultsError);
     } elseif (($_GET['tab'] ?? '') === 'check') {
         // Auto-load latest run when navigating to check tab with no explicit run_id
         $__latestRun = integrity_load_latest_run($pdo);
@@ -2593,6 +2594,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
             $meta    = $_intRunMeta;
             $results = $_intRunResults;
             $tabBase = $_intTabBase . '&tab=check&run_id=' . $_intRunId;
+            $resultsQueryError = $_intResultsError;
         ?>
         <div class="int-check-results">
 
@@ -2877,7 +2879,11 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
             <?php endif; ?>
           </form>
 
-          <?php if (empty($results)): ?>
+          <?php if ($resultsQueryError !== null): ?>
+          <div class="int-no-findings" style="color:#dc2626;border-color:#fca5a5;background:#fff5f5;">
+            Results query failed: <?= h($resultsQueryError) ?>
+          </div>
+          <?php elseif (empty($results)): ?>
           <div class="int-no-findings">No results match the current filters.</div>
           <?php else: ?>
 

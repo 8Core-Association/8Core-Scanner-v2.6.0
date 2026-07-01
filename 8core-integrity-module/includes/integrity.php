@@ -1239,8 +1239,11 @@ function integrity_load_run(PDO $pdo, int $runId): ?array {
 /**
  * Loads results for a run with optional filters.
  * $filters keys: type, severity, status, path (substring match on relative_path), ids, all_runs.
+ * On SQL failure sets $error to the PDO error message, logs it, and returns [].
+ * "No results" (empty array, null $error) means SQL succeeded but matched 0 rows.
  */
-function integrity_load_results(PDO $pdo, int $runId, array $filters = []): array {
+function integrity_load_results(PDO $pdo, int $runId, array $filters = [], ?string &$error = null): array {
+    $error = null;
     try {
         $allRuns = !empty($filters['all_runs']);
         $where   = [];
@@ -1301,6 +1304,15 @@ function integrity_load_results(PDO $pdo, int $runId, array $filters = []): arra
         $stmt->execute($params);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     } catch (PDOException $e) {
+        $error = $e->getMessage();
+        // Log to the integrity run log if available, otherwise the general PHP error log
+        $logPath = ($runId > 0) ? integrity_run_log_path($runId) : null;
+        $logLine = date('Y-m-d H:i:s') . ' [ERROR] integrity_load_results run=' . $runId . ': ' . $e->getMessage();
+        if ($logPath) {
+            integrity_log_write($logPath, $logLine);
+        } else {
+            error_log($logLine);
+        }
         return [];
     }
 }
