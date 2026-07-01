@@ -1221,8 +1221,42 @@ function integrity_load_run(PDO $pdo, int $runId): ?array {
  */
 function integrity_load_results(PDO $pdo, int $runId, array $filters = []): array {
     try {
-        $where  = ['run_id = :run'];
-        $params = [':run' => $runId];
+        $allRuns = !empty($filters['all_runs']);
+        $where   = [];
+        $params  = [];
+
+        // run_id scope (skip when all_runs + id filter is used)
+        if ($runId > 0 && !$allRuns) {
+            $where[]        = 'run_id = :run';
+            $params[':run'] = $runId;
+        }
+
+        // ID filter — parse "1,5,10-20,33" syntax
+        $idList = [];
+        if (!empty($filters['ids'])) {
+            foreach (explode(',', $filters['ids']) as $part) {
+                $part = trim($part);
+                if ($part === '') continue;
+                if (str_contains($part, '-')) {
+                    [$a, $b] = explode('-', $part, 2);
+                    $a = (int) trim($a);
+                    $b = (int) trim($b);
+                    if ($a > 0 && $b >= $a && ($b - $a) <= 10000) {
+                        for ($i = $a; $i <= $b; $i++) $idList[] = $i;
+                    }
+                } else {
+                    $n = (int) $part;
+                    if ($n > 0) $idList[] = $n;
+                }
+            }
+            $idList = array_values(array_unique($idList));
+        }
+
+        if (!empty($idList)) {
+            $ph      = implode(',', array_fill(0, count($idList), '?'));
+            $where[] = 'id IN (' . $ph . ')';
+            foreach ($idList as $idVal) $params[] = $idVal;
+        }
 
         if (!empty($filters['type'])) {
             $where[] = 'type = :ft';
@@ -1241,10 +1275,11 @@ function integrity_load_results(PDO $pdo, int $runId, array $filters = []): arra
             $params[':fp'] = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $filters['path']) . '%';
         }
 
-        $sql  = 'SELECT * FROM scanner_integrity_results WHERE ' . implode(' AND ', $where)
+        $whereClause = empty($where) ? '1' : implode(' AND ', $where);
+        $sql  = 'SELECT * FROM scanner_integrity_results WHERE ' . $whereClause
               . ' ORDER BY FIELD(severity,\'suspicious\',\'warning\',\'info\'), relative_path ASC';
         $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
+        $stmt->execute(array_values($params));
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     } catch (PDOException $e) {
         return [];

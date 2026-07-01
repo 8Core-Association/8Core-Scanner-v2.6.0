@@ -24,7 +24,8 @@ $_intZipConflict   = null;
 $_intRunId        = 0;      // current run_id (0 = no persisted run loaded)
 $_intRunMeta      = null;   // run row from DB
 $_intRunResults   = null;   // array of result rows from DB (null = not loaded)
-$_intRunFilters   = [];     // active filter values [type, severity, status, path]
+$_intRunFilters   = [];     // active filter values [type, severity, status, path, ids, all_runs]
+$_intDeepResultId = 0;      // result_id from deep-link ?result_id=N (0 = none)
 $_intBulkConfirm  = null;   // bulk preview data before destructive execute
 $_intCheckOrigin  = '';
 $_intCheckDest    = '';
@@ -50,7 +51,7 @@ function _int_flash_drain(): array {
 function _int_build_check_url(int $runId, array $filters = [], string $base = 'module.php?module=8core-integrity&page=module_integrity'): string {
     $url = $base . '&tab=check';
     if ($runId > 0) $url .= '&run_id=' . $runId;
-    foreach (['ft', 'fs', 'fst', 'fp'] as $k) {
+    foreach (['ft', 'fs', 'fst', 'fp', 'fi', 'fall'] as $k) {
         if (!empty($filters[$k])) $url .= '&' . $k . '=' . urlencode($filters[$k]);
     }
     return $url;
@@ -58,20 +59,36 @@ function _int_build_check_url(int $runId, array $filters = [], string $base = 'm
 
 function _int_filters_from_get(): array {
     return [
-        'type'     => trim($_GET['ft']  ?? ''),
-        'severity' => trim($_GET['fs']  ?? ''),
-        'status'   => trim($_GET['fst'] ?? ''),
-        'path'     => trim($_GET['fp']  ?? ''),
+        'type'      => trim($_GET['ft']   ?? ''),
+        'severity'  => trim($_GET['fs']   ?? ''),
+        'status'    => trim($_GET['fst']  ?? ''),
+        'path'      => trim($_GET['fp']   ?? ''),
+        'ids'       => trim($_GET['fi']   ?? ''),
+        'all_runs'  => !empty($_GET['fall']) ? '1' : '',
     ];
 }
 
 function _int_filters_to_get(array $f): array {
     return [
-        'ft'  => $f['type']     ?? '',
-        'fs'  => $f['severity'] ?? '',
-        'fst' => $f['status']   ?? '',
-        'fp'  => $f['path']     ?? '',
+        'ft'   => $f['type']     ?? '',
+        'fs'   => $f['severity'] ?? '',
+        'fst'  => $f['status']   ?? '',
+        'fp'   => $f['path']     ?? '',
+        'fi'   => $f['ids']      ?? '',
+        'fall' => $f['all_runs'] ?? '',
     ];
+}
+
+/**
+ * Returns true if any meaningful filter is set (used for "Clear filters" link).
+ */
+function _int_filters_active(array $f): bool {
+    return ($f['type'] ?? '') !== ''
+        || ($f['severity'] ?? '') !== ''
+        || ($f['status'] ?? '') !== ''
+        || ($f['path'] ?? '') !== ''
+        || ($f['ids'] ?? '') !== ''
+        || !empty($f['all_runs']);
 }
 
 // ── ID range parser: "1,5,10-20,33" → [1,5,10,11,...,20,33] ──────────────────
@@ -1110,9 +1127,21 @@ if (isset($_GET['inmem']) && isset($_SESSION['8int_inmem'])) {
     unset($_SESSION['8int_inmem'], $_SESSION['8int_inmem_sw'], $_SESSION['8int_inmem_excl']);
 }
 
-// Load persisted run from GET run_id
+// Load persisted run from GET run_id (or via result_id deep-link)
 if (!isset($_intBulkConfirm) || $_intBulkConfirm === null) {
-    $__getRunId = (int) ($_GET['run_id'] ?? 0);
+    $__getRunId   = (int) ($_GET['run_id']    ?? 0);
+    $__deepResult = (int) ($_GET['result_id'] ?? 0);
+
+    // Deep-link: ?result_id=N — auto-resolve run_id and set ID filter
+    if ($__deepResult > 0 && $__getRunId <= 0) {
+        $__deepRow = integrity_load_result_by_id($pdo, $__deepResult);
+        if ($__deepRow) {
+            $__getRunId = (int) $__deepRow['run_id'];
+            // Pre-seed the ids filter so the result is shown
+            $_GET['fi'] = (string) $__deepResult;
+        }
+    }
+
     if ($__getRunId > 0) {
         $_intRunId      = $__getRunId;
         $_intRunMeta    = integrity_load_run($pdo, $_intRunId);
@@ -1123,7 +1152,14 @@ if (!isset($_intBulkConfirm) || $_intBulkConfirm === null) {
             $_intCheckDest    = $_intRunMeta['destination_path'];
             $_intDetSoftware  = $_intRunMeta['software'] ?? '';
         }
+    } elseif (!empty($_GET['fi']) || !empty($_GET['fall'])) {
+        // all_runs ID search with no run_id
+        $_intRunFilters = _int_filters_from_get();
+        $_intRunResults = integrity_load_results($pdo, 0, $_intRunFilters);
     }
+
+    // Track the deep-link result id for JS auto-open
+    $_intDeepResultId = $__deepResult;
 }
 
 // ── Tab routing ────────────────────────────────────────────────────────────────
@@ -2580,15 +2616,29 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                 <option value="trashed"           <?= ($_intRunFilters['status'] ?? '') === 'trashed'           ? 'selected' : '' ?>>Trashed</option>
                 <option value="replaced"          <?= ($_intRunFilters['status'] ?? '') === 'replaced'          ? 'selected' : '' ?>>Replaced</option>
                 <option value="failed"            <?= ($_intRunFilters['status'] ?? '') === 'failed'            ? 'selected' : '' ?>>Failed</option>
-                <option value="pending_action"   <?= ($_intRunFilters['status'] ?? '') === 'pending_action'   ? 'selected' : '' ?>>Pending action</option>
+                <option value="pending_action"    <?= ($_intRunFilters['status'] ?? '') === 'pending_action'    ? 'selected' : '' ?>>Pending action</option>
               </select>
             </div>
             <div>
               <label>Path contains</label>
               <input type="text" name="fp" value="<?= h($_intRunFilters['path'] ?? '') ?>" placeholder="e.g. administrator">
             </div>
+            <div>
+              <label>Result ID</label>
+              <input type="text" name="fi" id="int-fi-input"
+                     value="<?= h($_intRunFilters['ids'] ?? '') ?>"
+                     placeholder="e.g. 27557 or 27557-27570"
+                     style="width:180px;">
+            </div>
+            <div style="display:flex;flex-direction:column;justify-content:flex-end;gap:4px;padding-bottom:1px;">
+              <label style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:var(--text-muted);text-transform:none;letter-spacing:0;cursor:pointer;">
+                <input type="checkbox" name="fall" value="1" id="int-fall-cb"
+                       <?= !empty($_intRunFilters['all_runs']) ? 'checked' : '' ?>>
+                Search all runs
+              </label>
+            </div>
             <button type="submit" class="btn btn-ghost" style="font-size:12px;padding:6px 12px;align-self:flex-end;">Filter</button>
-            <?php if (array_filter($_intRunFilters)): ?>
+            <?php if (_int_filters_active($_intRunFilters)): ?>
             <a href="<?= h($_intTabBase . '&tab=check&run_id=' . $_intRunId) ?>" class="int-filter-reset">Clear filters</a>
             <?php endif; ?>
           </form>
@@ -2648,6 +2698,9 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                   <th class="col-cb"><input type="checkbox" id="int-cb-all" title="Toggle all"></th>
                   <th class="col-exp"></th>
                   <th class="col-id">ID</th>
+                  <?php if (!empty($_intRunFilters['all_runs'])): ?>
+                  <th>Run</th>
+                  <?php endif; ?>
                   <th>Severity</th>
                   <th>Type</th>
                   <th>Path</th>
@@ -2657,7 +2710,9 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                 </tr>
               </thead>
               <tbody>
-                <?php foreach ($results as $r):
+                <?php
+                  $_intAllRunsMode = !empty($_intRunFilters['all_runs']);
+                  foreach ($results as $r):
                   $isActioned  = $r['status'] !== 'new';
                   $isExtra     = str_starts_with($r['type'], 'EXTRA_');
                   $isMissing   = str_starts_with($r['type'], 'MISSING_');
@@ -2681,6 +2736,9 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                     <button type="button" class="int-expand-btn" data-result-id="<?= (int)$r['id'] ?>" title="Show details">&#9654;</button>
                   </td>
                   <td style="font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-muted);"><?= (int)$r['id'] ?></td>
+                  <?php if ($_intAllRunsMode): ?>
+                  <td style="font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-muted);"><?= (int)$r['run_id'] ?></td>
+                  <?php endif; ?>
                   <td><span class="int-sev-badge <?= h($r['severity']) ?>"><?= strtoupper(h($r['severity'])) ?></span></td>
                   <td><span class="int-result-type"><?= h($r['type']) ?></span></td>
                   <td>
@@ -2920,7 +2978,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                   $__ajaxBase = h($_intTabBase);
                 ?>
                 <tr class="int-detail-row" id="int-detail-<?= (int)$r['id'] ?>" style="display:none;">
-                  <td colspan="9" style="padding:0;border-bottom:2px solid #2563eb;">
+                  <td colspan="<?= $_intAllRunsMode ? 10 : 9 ?>" style="padding:0;border-bottom:2px solid #2563eb;">
                     <div class="int-detail-panel">
 
                       <!-- Left column: IDs + hashes + sizes -->
@@ -3549,6 +3607,16 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
       detRow.style.display = open ? '' : 'none';
     });
   });
+
+  // Deep-link auto-open
+  var deepId = <?= (int)$_intDeepResultId ?>;
+  if (deepId > 0) {
+    var deepBtn = document.querySelector('.int-expand-btn[data-result-id="' + deepId + '"]');
+    if (deepBtn) {
+      deepBtn.click();
+      deepBtn.scrollIntoView({behavior: 'smooth', block: 'center'});
+    }
+  }
 
   // File preview buttons
   document.addEventListener('click', function (e) {
