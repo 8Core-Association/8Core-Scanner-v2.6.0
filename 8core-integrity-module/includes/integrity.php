@@ -492,8 +492,8 @@ function integrity_user_content_folders(string $software): array {
 // ── DB: integrity ignore list ──────────────────────────────────────────────────
 
 /**
- * Creates scanner_integrity_ignores if it does not exist.
- * Called once per page load before any ignore-table query.
+ * Creates all Integrity module tables if they do not exist.
+ * Called once per page load before any DB query in this module.
  */
 function integrity_ensure_tables(PDO $pdo): bool {
     try {
@@ -510,6 +510,44 @@ function integrity_ensure_tables(PDO $pdo): bool {
                KEY `idx_origin_path`      (`origin_path`(100)),
                KEY `idx_destination_path` (`destination_path`(100)),
                KEY `idx_ignored_path`     (`ignored_path`(100))
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS `scanner_integrity_runs` (
+               `id`               INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+               `origin_path`      VARCHAR(1000) NOT NULL,
+               `destination_path` VARCHAR(1000) NOT NULL,
+               `software`         VARCHAR(100)  NULL,
+               `total`            INT UNSIGNED  NOT NULL DEFAULT 0,
+               `suspicious`       INT UNSIGNED  NOT NULL DEFAULT 0,
+               `warnings`         INT UNSIGNED  NOT NULL DEFAULT 0,
+               `info`             INT UNSIGNED  NOT NULL DEFAULT 0,
+               `created_at`       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               PRIMARY KEY (`id`),
+               KEY `idx_origin_path`      (`origin_path`(100)),
+               KEY `idx_destination_path` (`destination_path`(100)),
+               KEY `idx_created_at`       (`created_at`)
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS `scanner_integrity_results` (
+               `id`               INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+               `run_id`           INT UNSIGNED  NOT NULL,
+               `origin_path`      VARCHAR(1000) NOT NULL,
+               `destination_path` VARCHAR(1000) NOT NULL,
+               `type`             VARCHAR(40)   NOT NULL,
+               `severity`         VARCHAR(20)   NOT NULL,
+               `relative_path`    VARCHAR(2000) NOT NULL,
+               `full_path`        VARCHAR(2000) NOT NULL,
+               `status`           VARCHAR(30)   NOT NULL DEFAULT \'new\',
+               `note`             TEXT          NULL,
+               `created_at`       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               `updated_at`       DATETIME      NULL      ON UPDATE CURRENT_TIMESTAMP,
+               PRIMARY KEY (`id`),
+               KEY `idx_run_id`   (`run_id`),
+               KEY `idx_status`   (`status`),
+               KEY `idx_severity` (`severity`),
+               KEY `idx_type`     (`type`)
              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
         );
         return true;
@@ -732,5 +770,257 @@ function integrity_structural_check(
         'truncated' => $truncated,
         'counts'    => $counts,
     ];
+}
+
+// ── DB: run persistence ────────────────────────────────────────────────────────
+
+/**
+ * Saves a structural check run to DB. Returns run_id on success, 0 on error.
+ */
+function integrity_save_run(PDO $pdo, string $origin, string $dest, string $software, array $counts): int {
+    try {
+        $stmt = $pdo->prepare(
+            'INSERT INTO scanner_integrity_runs
+               (origin_path, destination_path, software, total, suspicious, warnings, info, created_at)
+             VALUES (:o, :d, :s, :total, :susp, :warn, :info, NOW())'
+        );
+        $stmt->execute([
+            ':o'     => $origin,
+            ':d'     => $dest,
+            ':s'     => $software ?: null,
+            ':total' => ($counts['suspicious'] ?? 0) + ($counts['warning'] ?? 0) + ($counts['info'] ?? 0),
+            ':susp'  => $counts['suspicious'] ?? 0,
+            ':warn'  => $counts['warning']    ?? 0,
+            ':info'  => $counts['info']       ?? 0,
+        ]);
+        return (int) $pdo->lastInsertId();
+    } catch (PDOException $e) {
+        return 0;
+    }
+}
+
+/**
+ * Bulk-inserts findings for a run. Returns number of rows inserted.
+ */
+function integrity_save_results(PDO $pdo, int $runId, string $origin, string $dest, array $findings): int {
+    if (empty($findings)) return 0;
+    try {
+        $stmt = $pdo->prepare(
+            'INSERT INTO scanner_integrity_results
+               (run_id, origin_path, destination_path, type, severity, relative_path, full_path, status, created_at)
+             VALUES (:run, :o, :d, :t, :sev, :rel, :full, \'new\', NOW())'
+        );
+        $inserted = 0;
+        foreach ($findings as $f) {
+            $stmt->execute([
+                ':run'  => $runId,
+                ':o'    => $origin,
+                ':d'    => $dest,
+                ':t'    => $f['type'],
+                ':sev'  => $f['severity'],
+                ':rel'  => $f['rel'],
+                ':full' => $f['fullpath'],
+            ]);
+            $inserted++;
+        }
+        return $inserted;
+    } catch (PDOException $e) {
+        return 0;
+    }
+}
+
+/**
+ * Loads run metadata by ID. Returns array or null.
+ */
+function integrity_load_run(PDO $pdo, int $runId): ?array {
+    try {
+        $stmt = $pdo->prepare('SELECT * FROM scanner_integrity_runs WHERE id = :id LIMIT 1');
+        $stmt->execute([':id' => $runId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    } catch (PDOException $e) {
+        return null;
+    }
+}
+
+/**
+ * Loads results for a run with optional filters.
+ * $filters keys: type, severity, status, path (substring match on relative_path).
+ */
+function integrity_load_results(PDO $pdo, int $runId, array $filters = []): array {
+    try {
+        $where  = ['run_id = :run'];
+        $params = [':run' => $runId];
+
+        if (!empty($filters['type'])) {
+            $where[] = 'type = :ft';
+            $params[':ft'] = $filters['type'];
+        }
+        if (!empty($filters['severity'])) {
+            $where[] = 'severity = :fs';
+            $params[':fs'] = $filters['severity'];
+        }
+        if (!empty($filters['status'])) {
+            $where[] = 'status = :fst';
+            $params[':fst'] = $filters['status'];
+        }
+        if (!empty($filters['path'])) {
+            $where[] = 'relative_path LIKE :fp';
+            $params[':fp'] = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $filters['path']) . '%';
+        }
+
+        $sql  = 'SELECT * FROM scanner_integrity_results WHERE ' . implode(' AND ', $where)
+              . ' ORDER BY FIELD(severity,\'suspicious\',\'warning\',\'info\'), relative_path ASC';
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        return [];
+    }
+}
+
+/**
+ * Loads specific result rows by their IDs, scoped to a run.
+ */
+function integrity_load_results_by_ids(PDO $pdo, int $runId, array $ids): array {
+    if (empty($ids)) return [];
+    try {
+        $ids = array_map('intval', $ids);
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $pdo->prepare(
+            "SELECT * FROM scanner_integrity_results WHERE run_id = ? AND id IN ($placeholders)"
+        );
+        $stmt->execute(array_merge([$runId], $ids));
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        return [];
+    }
+}
+
+/**
+ * Updates status (and optional note) for a single result row, scoped to a run.
+ */
+function integrity_update_result_status(PDO $pdo, int $runId, int $resultId, string $status, string $note = ''): bool {
+    $allowed = ['new', 'ignored_integrity', 'replaced', 'trashed', 'failed'];
+    if (!in_array($status, $allowed, true)) return false;
+    try {
+        $stmt = $pdo->prepare(
+            'UPDATE scanner_integrity_results
+                SET status = :s, note = :n, updated_at = NOW()
+              WHERE id = :id AND run_id = :run LIMIT 1'
+        );
+        return $stmt->execute([':s' => $status, ':n' => $note, ':id' => $resultId, ':run' => $runId]);
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+// ── Integrity Trash ────────────────────────────────────────────────────────────
+
+function integrity_trash_root(): string {
+    return '/home/8core_integrity/trash';
+}
+
+/**
+ * Moves a file or directory from its current location to the Integrity Trash.
+ * Trash path: /home/8core_integrity/trash/YYYYMMDD-HHMMSS/<relative_path>
+ * Safety: fullPath must be under /home and must match destRoot + / + relativePath.
+ *
+ * Returns ['ok' => bool, 'error' => string, 'trash_path' => string].
+ */
+function integrity_do_trash_path(string $fullPath, string $destRoot, string $relativePath): array {
+    $relativePath = ltrim($relativePath, '/');
+    if ($relativePath === '' || str_contains($relativePath, '..')) {
+        return ['ok' => false, 'error' => 'Invalid relative path.', 'trash_path' => ''];
+    }
+
+    // Safety: path must be inside /home
+    $real = realpath($fullPath);
+    if ($real === false) {
+        return ['ok' => false, 'error' => 'Path does not exist: ' . $fullPath, 'trash_path' => ''];
+    }
+    if ($real !== '/home' && !str_starts_with($real, '/home/')) {
+        return ['ok' => false, 'error' => 'Path is not inside /home.', 'trash_path' => ''];
+    }
+    // Must match expected destination root
+    $expectedBase = rtrim(realpath($destRoot) ?: $destRoot, '/') . '/' . $relativePath;
+    if ($real !== realpath($expectedBase) && $real !== $expectedBase) {
+        return ['ok' => false, 'error' => 'Path does not match expected destination.', 'trash_path' => ''];
+    }
+
+    $trashDir  = integrity_trash_root() . '/' . date('Ymd-His');
+    $trashDest = $trashDir . '/' . $relativePath;
+    $trashParent = dirname($trashDest);
+
+    if (!is_dir($trashParent) && !@mkdir($trashParent, 0755, true)) {
+        return ['ok' => false, 'error' => 'Cannot create trash directory.', 'trash_path' => ''];
+    }
+
+    if (!@rename($real, $trashDest)) {
+        return ['ok' => false, 'error' => 'rename() failed. Check permissions.', 'trash_path' => ''];
+    }
+
+    return ['ok' => true, 'error' => '', 'trash_path' => $trashDest];
+}
+
+/**
+ * Replaces a missing path in the destination by copying it from the origin.
+ * Only copies files; directories are created without recursion into origin sub-tree.
+ * Safety: destRoot must be under /home; originFull must be under originRoot.
+ *
+ * Returns ['ok' => bool, 'error' => string].
+ */
+function integrity_do_replace_path(
+    string $originRoot,
+    string $originRelPath,
+    string $destRoot,
+    string $destRelPath
+): array {
+    $originRelPath = ltrim($originRelPath, '/');
+    $destRelPath   = ltrim($destRelPath,   '/');
+
+    if ($originRelPath === '' || $destRelPath === '') {
+        return ['ok' => false, 'error' => 'Empty path.'];
+    }
+    if (str_contains($originRelPath, '..') || str_contains($destRelPath, '..')) {
+        return ['ok' => false, 'error' => 'Path traversal rejected.'];
+    }
+
+    $realDestRoot = realpath($destRoot);
+    if ($realDestRoot === false || ($realDestRoot !== '/home' && !str_starts_with($realDestRoot, '/home/'))) {
+        return ['ok' => false, 'error' => 'Destination root must be inside /home.'];
+    }
+
+    $srcFull  = realpath($originRoot . '/' . $originRelPath);
+    if ($srcFull === false) {
+        return ['ok' => false, 'error' => 'Source path not found in origin.'];
+    }
+    $realOriginRoot = realpath($originRoot);
+    if ($realOriginRoot === false || !str_starts_with($srcFull, $realOriginRoot . '/')) {
+        return ['ok' => false, 'error' => 'Source escapes origin root.'];
+    }
+
+    $destFull = $realDestRoot . '/' . $destRelPath;
+    if (file_exists($destFull)) {
+        return ['ok' => false, 'error' => 'Destination already exists (will not overwrite).'];
+    }
+
+    $destParent = dirname($destFull);
+    if (!is_dir($destParent) && !@mkdir($destParent, 0755, true)) {
+        return ['ok' => false, 'error' => 'Cannot create destination parent directory.'];
+    }
+
+    if (is_dir($srcFull)) {
+        if (!@mkdir($destFull, 0755, true)) {
+            return ['ok' => false, 'error' => 'Cannot create destination directory.'];
+        }
+        return ['ok' => true, 'error' => ''];
+    }
+
+    if (!@copy($srcFull, $destFull)) {
+        return ['ok' => false, 'error' => 'copy() failed. Check permissions.'];
+    }
+
+    return ['ok' => true, 'error' => ''];
 }
 

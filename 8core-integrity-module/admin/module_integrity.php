@@ -19,10 +19,77 @@ $_intShowRootCmd   = false;
 $_intRootCmd       = '';
 $_intImportSuccess = null;
 $_intZipConflict   = null;
-$_intCheckResults  = null;   // set after run_structural_check or add_integrity_ignore
-$_intCheckOrigin   = '';
-$_intCheckDest     = '';
-$_intDetSoftware   = '';     // detected software name (passed through forms)
+
+// Check tab state
+$_intRunId        = 0;      // current run_id (0 = no persisted run loaded)
+$_intRunMeta      = null;   // run row from DB
+$_intRunResults   = null;   // array of result rows from DB (null = not loaded)
+$_intRunFilters   = [];     // active filter values [type, severity, status, path]
+$_intBulkConfirm  = null;   // bulk preview data before destructive execute
+$_intCheckOrigin  = '';
+$_intCheckDest    = '';
+$_intDetSoftware  = '';     // detected software name (passed through forms)
+
+// ── Flash message helpers ──────────────────────────────────────────────────────
+
+function _int_flash_set(string $type, string $text): void {
+    $_SESSION['8int_flash'][] = ['type' => $type, 'text' => $text];
+}
+
+function _int_flash_drain(): array {
+    $msgs = $_SESSION['8int_flash'] ?? [];
+    unset($_SESSION['8int_flash']);
+    return $msgs;
+}
+
+// ── URL helpers ────────────────────────────────────────────────────────────────
+
+function _int_build_check_url(int $runId, array $filters = [], string $base = 'module.php?module=8core-integrity&page=module_integrity'): string {
+    $url = $base . '&tab=check';
+    if ($runId > 0) $url .= '&run_id=' . $runId;
+    foreach (['ft', 'fs', 'fst', 'fp'] as $k) {
+        if (!empty($filters[$k])) $url .= '&' . $k . '=' . urlencode($filters[$k]);
+    }
+    return $url;
+}
+
+function _int_filters_from_get(): array {
+    return [
+        'type'     => trim($_GET['ft']  ?? ''),
+        'severity' => trim($_GET['fs']  ?? ''),
+        'status'   => trim($_GET['fst'] ?? ''),
+        'path'     => trim($_GET['fp']  ?? ''),
+    ];
+}
+
+function _int_filters_to_get(array $f): array {
+    return [
+        'ft'  => $f['type']     ?? '',
+        'fs'  => $f['severity'] ?? '',
+        'fst' => $f['status']   ?? '',
+        'fp'  => $f['path']     ?? '',
+    ];
+}
+
+// ── ID range parser: "1,5,10-20,33" → [1,5,10,11,...,20,33] ──────────────────
+
+function _int_parse_id_range(string $input, int $maxId = 9999999): array {
+    $ids = [];
+    foreach (explode(',', $input) as $part) {
+        $part = trim($part);
+        if ($part === '') continue;
+        if (str_contains($part, '-')) {
+            [$from, $to] = explode('-', $part, 2);
+            $from = (int) trim($from);
+            $to   = (int) trim($to);
+            if ($from < 1 || $to < $from || ($to - $from) > 10000) continue;
+            for ($i = $from; $i <= $to; $i++) $ids[] = $i;
+        } elseif (ctype_digit($part)) {
+            $ids[] = (int) $part;
+        }
+    }
+    return array_values(array_unique(array_filter($ids, fn($id) => $id >= 1 && $id <= $maxId)));
+}
 
 // ── POST handlers ──────────────────────────────────────────────────────────────
 
@@ -263,33 +330,175 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!$result['ok']) {
                 $_intMessages[] = ['type' => 'err', 'text' => 'Check failed: ' . $result['error']];
             } else {
-                $_intCheckResults = $result;
+                $runId = integrity_save_run($pdo, $result['origin'], $result['dest'], $_intDetSoftware, $result['counts']);
+                if ($runId > 0) {
+                    integrity_save_results($pdo, $runId, $result['origin'], $result['dest'], $result['findings']);
+                    _int_flash_set('ok', 'Structural check complete. '
+                        . count($result['findings']) . ' finding(s) found.');
+                    header('Location: ' . _int_build_check_url($runId));
+                    exit;
+                }
+                // DB save failed — render results in-memory without PRG
+                $_intMessages[] = ['type' => 'warn', 'text' => 'Results could not be saved to database. Showing in-memory results.'];
+                // Store in session for single render
+                $_SESSION['8int_inmem'] = $result;
+                $_SESSION['8int_inmem_sw'] = $_intDetSoftware;
+                header('Location: module.php?module=8core-integrity&page=module_integrity&tab=check&inmem=1');
+                exit;
             }
         }
     }
 
-    // ── Add integrity ignore (then re-run check) ───────────────────────────────
-    if ($postAction === 'add_integrity_ignore') {
-        $_intDetSoftware = trim($_POST['detected_software'] ?? '');
-        $_intCheckOrigin = trim($_POST['origin_path']  ?? '');
-        $_intCheckDest   = trim($_POST['dest_path']    ?? '');
-        $ignPath         = trim($_POST['ignored_path'] ?? '');
-        $ignType         = trim($_POST['ignore_type']  ?? 'extra_path');
-        $ignNote         = trim($_POST['ignore_note']  ?? '');
+    // ── Single result action ───────────────────────────────────────────────────
+    if ($postAction === 'action_result') {
+        $runId    = (int) ($_POST['run_id']    ?? 0);
+        $resultId = (int) ($_POST['result_id'] ?? 0);
+        $action   = trim($_POST['result_action'] ?? '');
+        $filters  = _int_filters_to_get([
+            'type'     => trim($_POST['ft']  ?? ''),
+            'severity' => trim($_POST['fs']  ?? ''),
+            'status'   => trim($_POST['fst'] ?? ''),
+            'path'     => trim($_POST['fp']  ?? ''),
+        ]);
 
-        if ($_intCheckOrigin && $_intCheckDest && $ignPath) {
-            if (integrity_add_ignore($pdo, $_intCheckOrigin, $_intCheckDest, $ignPath, $ignType, $ignNote)) {
-                $_intMessages[] = ['type' => 'ok', 'text' => 'Ignored in Integrity: ' . $ignPath];
-            } else {
-                $_intMessages[] = ['type' => 'err', 'text' => 'Could not add ignore (invalid path or DB error).'];
-            }
-            // Re-run check with updated ignore list
-            $ignores = integrity_ignores_for($pdo, $_intCheckOrigin, $_intCheckDest);
-            $result  = integrity_structural_check($_intCheckOrigin, $_intCheckDest, $_intDetSoftware, $ignores);
-            if ($result['ok']) {
-                $_intCheckResults = $result;
+        if ($runId > 0 && $resultId > 0) {
+            $rows = integrity_load_results_by_ids($pdo, $runId, [$resultId]);
+            $row  = $rows[0] ?? null;
+
+            if (!$row) {
+                _int_flash_set('err', 'Result not found.');
+            } elseif ($action === 'ignore') {
+                integrity_add_ignore($pdo, $row['origin_path'], $row['destination_path'],
+                                     $row['relative_path'],
+                                     str_contains($row['type'], 'MISSING') ? 'missing_path' : 'extra_path');
+                integrity_update_result_status($pdo, $runId, $resultId, 'ignored_integrity');
+                _int_flash_set('ok', 'Ignored in Integrity: ' . $row['relative_path']);
+            } elseif ($action === 'trash') {
+                $tr = integrity_do_trash_path($row['full_path'], $row['destination_path'], $row['relative_path']);
+                if ($tr['ok']) {
+                    integrity_update_result_status($pdo, $runId, $resultId, 'trashed', $tr['trash_path']);
+                    _int_flash_set('ok', 'Moved to Integrity Trash: ' . $row['relative_path']);
+                } else {
+                    integrity_update_result_status($pdo, $runId, $resultId, 'failed', $tr['error']);
+                    _int_flash_set('err', 'Trash failed: ' . $tr['error']);
+                }
+            } elseif ($action === 'replace') {
+                $rr = integrity_do_replace_path($row['origin_path'], $row['relative_path'],
+                                                $row['destination_path'], $row['relative_path']);
+                if ($rr['ok']) {
+                    integrity_update_result_status($pdo, $runId, $resultId, 'replaced');
+                    _int_flash_set('ok', 'Replaced from origin: ' . $row['relative_path']);
+                } else {
+                    integrity_update_result_status($pdo, $runId, $resultId, 'failed', $rr['error']);
+                    _int_flash_set('err', 'Replace failed: ' . $rr['error']);
+                }
             }
         }
+        header('Location: ' . _int_build_check_url($runId, $filters));
+        exit;
+    }
+
+    // ── Bulk preview (render confirm screen) ───────────────────────────────────
+    if ($postAction === 'bulk_preview') {
+        $runId      = (int) ($_POST['run_id']      ?? 0);
+        $bulkAction = trim($_POST['bulk_action']   ?? '');
+        $selectMode = trim($_POST['select_mode']   ?? 'checked'); // checked | range
+        $idRange    = trim($_POST['id_range']      ?? '');
+        $checkedIds = array_map('intval', (array) ($_POST['result_ids'] ?? []));
+
+        $filters = _int_filters_to_get([
+            'type'     => trim($_POST['ft']  ?? ''),
+            'severity' => trim($_POST['fs']  ?? ''),
+            'status'   => trim($_POST['fst'] ?? ''),
+            'path'     => trim($_POST['fp']  ?? ''),
+        ]);
+
+        $ids = ($selectMode === 'range')
+            ? _int_parse_id_range($idRange)
+            : $checkedIds;
+
+        $allowedBulk = ['ignore', 'trash'];
+        if (!in_array($bulkAction, $allowedBulk, true) || empty($ids) || $runId <= 0) {
+            _int_flash_set('err', 'No items selected or invalid bulk action.');
+            header('Location: ' . _int_build_check_url($runId, $filters));
+            exit;
+        }
+
+        $rows = integrity_load_results_by_ids($pdo, $runId, $ids);
+        if (empty($rows)) {
+            _int_flash_set('err', 'None of the selected IDs exist in this run.');
+            header('Location: ' . _int_build_check_url($runId, $filters));
+            exit;
+        }
+
+        // Validate: trash only applies to EXTRA_ types
+        if ($bulkAction === 'trash') {
+            $rows = array_filter($rows, fn($r) => str_starts_with($r['type'], 'EXTRA_') && $r['status'] === 'new');
+        } elseif ($bulkAction === 'ignore') {
+            $rows = array_filter($rows, fn($r) => $r['status'] === 'new');
+        }
+        $rows = array_values($rows);
+
+        if (empty($rows)) {
+            _int_flash_set('err', 'No eligible items for "' . $bulkAction . '" among selected IDs (wrong type or already actioned).');
+            header('Location: ' . _int_build_check_url($runId, $filters));
+            exit;
+        }
+
+        $_intBulkConfirm = [
+            'action'  => $bulkAction,
+            'run_id'  => $runId,
+            'rows'    => $rows,
+            'filters' => $filters,
+        ];
+        // Fall through to render (no redirect — confirm screen rendered in-page)
+    }
+
+    // ── Bulk execute ───────────────────────────────────────────────────────────
+    if ($postAction === 'bulk_execute') {
+        $runId      = (int) ($_POST['run_id']    ?? 0);
+        $bulkAction = trim($_POST['bulk_action'] ?? '');
+        $ids        = array_map('intval', (array) ($_POST['confirmed_ids'] ?? []));
+        $filters    = _int_filters_to_get([
+            'type'     => trim($_POST['ft']  ?? ''),
+            'severity' => trim($_POST['fs']  ?? ''),
+            'status'   => trim($_POST['fst'] ?? ''),
+            'path'     => trim($_POST['fp']  ?? ''),
+        ]);
+
+        if ($runId > 0 && !empty($ids) && in_array($bulkAction, ['ignore', 'trash'], true)) {
+            $rows  = integrity_load_results_by_ids($pdo, $runId, $ids);
+            $ok    = 0;
+            $fail  = 0;
+
+            foreach ($rows as $row) {
+                if ($row['status'] !== 'new') continue;
+
+                if ($bulkAction === 'ignore') {
+                    integrity_add_ignore($pdo, $row['origin_path'], $row['destination_path'],
+                                         $row['relative_path'],
+                                         str_contains($row['type'], 'MISSING') ? 'missing_path' : 'extra_path');
+                    integrity_update_result_status($pdo, $runId, (int) $row['id'], 'ignored_integrity');
+                    $ok++;
+                } elseif ($bulkAction === 'trash' && str_starts_with($row['type'], 'EXTRA_')) {
+                    $tr = integrity_do_trash_path($row['full_path'], $row['destination_path'], $row['relative_path']);
+                    if ($tr['ok']) {
+                        integrity_update_result_status($pdo, $runId, (int) $row['id'], 'trashed', $tr['trash_path']);
+                        $ok++;
+                    } else {
+                        integrity_update_result_status($pdo, $runId, (int) $row['id'], 'failed', $tr['error']);
+                        $fail++;
+                    }
+                }
+            }
+
+            $msg = "Bulk {$bulkAction}: {$ok} succeeded";
+            if ($fail > 0) $msg .= ", {$fail} failed";
+            _int_flash_set($fail > 0 ? 'warn' : 'ok', $msg . '.');
+        }
+
+        header('Location: ' . _int_build_check_url($runId, $filters));
+        exit;
     }
 
     // ── AJAX: browse directory ─────────────────────────────────────────────────
@@ -377,6 +586,34 @@ foreach ($_intGroups as $g) {
 }
 foreach ($_intExtraApps as $ea) {
     $_intAllAppKeys[] = $ea;
+}
+
+// Drain flash messages
+foreach (_int_flash_drain() as $fm) {
+    $_intMessages[] = $fm;
+}
+
+// In-memory result fallback (no DB)
+if (isset($_GET['inmem']) && isset($_SESSION['8int_inmem'])) {
+    $_intCheckResults = $_SESSION['8int_inmem'];
+    $_intDetSoftware  = $_SESSION['8int_inmem_sw'] ?? '';
+    unset($_SESSION['8int_inmem'], $_SESSION['8int_inmem_sw']);
+}
+
+// Load persisted run from GET run_id
+if (!isset($_intBulkConfirm) || $_intBulkConfirm === null) {
+    $__getRunId = (int) ($_GET['run_id'] ?? 0);
+    if ($__getRunId > 0) {
+        $_intRunId      = $__getRunId;
+        $_intRunMeta    = integrity_load_run($pdo, $_intRunId);
+        $_intRunFilters = _int_filters_from_get();
+        if ($_intRunMeta) {
+            $_intRunResults = integrity_load_results($pdo, $_intRunId, $_intRunFilters);
+            $_intCheckOrigin  = $_intRunMeta['origin_path'];
+            $_intCheckDest    = $_intRunMeta['destination_path'];
+            $_intDetSoftware  = $_intRunMeta['software'] ?? '';
+        }
+    }
 }
 
 // ── Tab routing ────────────────────────────────────────────────────────────────
@@ -533,7 +770,74 @@ require __DIR__ . '/../../../includes/version.php';
 .int-tab:hover { color:var(--text); border-bottom-color:var(--border); }
 .int-tab.is-active { color:#2563eb; border-bottom-color:#2563eb; }
 
-/* ── Check results ── */
+/* ── Run info bar ── */
+.int-run-bar { display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding:10px 14px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; margin-bottom:14px; font-size:12px; }
+.int-run-bar-label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-muted); margin-bottom:2px; }
+.int-run-bar-val { font-family:var(--font-mono,monospace); color:var(--text); word-break:break-all; font-size:12px; }
+.int-run-bar-item { display:flex; flex-direction:column; min-width:0; }
+.int-run-bar-sep { border-left:1px solid var(--border); height:28px; align-self:center; }
+.int-run-bar-actions { margin-left:auto; display:flex; gap:6px; }
+
+/* ── Filter bar ── */
+.int-filter-bar { display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px; padding:10px 14px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; margin-bottom:14px; }
+.int-filter-bar label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-muted); display:block; margin-bottom:3px; }
+.int-filter-bar select,
+.int-filter-bar input[type=text] { padding:6px 9px; background:#fff; border:1px solid var(--border); border-radius:5px; font-size:12px; color:var(--text); outline:none; transition:border-color .12s; }
+.int-filter-bar select:focus,
+.int-filter-bar input[type=text]:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.15); }
+.int-filter-bar input[type=text] { width:160px; }
+.int-filter-reset { font-size:11px; color:#64748b; text-decoration:none; padding:5px 8px; border:1px solid var(--border); border-radius:5px; background:none; cursor:pointer; align-self:flex-end; margin-bottom:1px; transition:background .12s; }
+.int-filter-reset:hover { background:var(--surface2); }
+
+/* ── Bulk action bar ── */
+.int-bulk-bar { display:flex; flex-wrap:wrap; align-items:flex-end; gap:10px; padding:10px 14px; background:#f8fafc; border:1px solid var(--border); border-radius:8px; margin-bottom:10px; }
+.int-bulk-bar label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-muted); display:block; margin-bottom:3px; }
+.int-bulk-bar select { padding:6px 9px; background:#fff; border:1px solid var(--border); border-radius:5px; font-size:12px; color:var(--text); outline:none; }
+.int-bulk-counter { font-size:12px; color:var(--text-muted); align-self:flex-end; margin-bottom:1px; }
+.int-bulk-counter strong { color:var(--text); }
+.int-bulk-id-group { display:flex; flex-direction:column; }
+.int-bulk-id-input { padding:6px 9px; background:#fff; border:1px solid var(--border); border-radius:5px; font-size:12px; color:var(--text); width:200px; outline:none; }
+.int-bulk-id-hint { font-size:10px; color:var(--text-muted); margin-top:3px; }
+
+/* ── Selection helpers ── */
+.int-sel-bar { display:flex; gap:6px; margin-bottom:6px; }
+.int-sel-btn { font-size:11px; padding:4px 9px; border:1px solid var(--border); background:none; border-radius:5px; cursor:pointer; color:var(--text-muted); transition:background .12s, color .12s; }
+.int-sel-btn:hover { background:var(--surface2); color:var(--text); }
+
+/* ── Status badges ── */
+.int-status-badge { display:inline-block; padding:2px 7px; border-radius:4px; font-size:10px; font-weight:700; letter-spacing:.04em; white-space:nowrap; }
+.int-status-badge.new               { background:#f1f5f9; color:#475569; }
+.int-status-badge.ignored_integrity { background:#fef3c7; color:#92400e; }
+.int-status-badge.trashed           { background:#fee2e2; color:#dc2626; }
+.int-status-badge.replaced          { background:#dcfce7; color:#166534; }
+.int-status-badge.failed            { background:#fce7f3; color:#9d174d; }
+
+/* ── Row action buttons ── */
+.int-row-actions { display:flex; gap:5px; flex-wrap:wrap; }
+.int-btn-act { background:none; border:1px solid var(--border); border-radius:5px; padding:3px 8px; font-size:11px; color:var(--text-muted); cursor:pointer; white-space:nowrap; transition:background .12s, color .12s, border-color .12s; }
+.int-btn-act:hover { background:var(--surface2); color:var(--text); }
+.int-btn-act.act-ignore:hover  { background:#fef3c7; border-color:#d97706; color:#92400e; }
+.int-btn-act.act-trash:hover   { background:#fee2e2; border-color:#dc2626; color:#dc2626; }
+.int-btn-act.act-replace:hover { background:#dcfce7; border-color:#16a34a; color:#166534; }
+.int-btn-act:disabled { opacity:.4; cursor:default; }
+
+/* ── Bulk confirm screen ── */
+.int-bulk-confirm { background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:16px 20px; margin-bottom:16px; }
+.int-bulk-confirm-title { font-size:13px; font-weight:700; color:#92400e; margin:0 0 10px; }
+.int-bulk-confirm-list { max-height:220px; overflow-y:auto; border:1px solid #fde68a; border-radius:6px; background:#fff; margin-bottom:14px; }
+.int-bulk-confirm-list table { width:100%; border-collapse:collapse; font-size:12px; }
+.int-bulk-confirm-list th { padding:7px 10px; border-bottom:1px solid #fde68a; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:#92400e; background:#fffbeb; }
+.int-bulk-confirm-list td { padding:6px 10px; border-bottom:1px solid #fef3c7; vertical-align:middle; font-family:var(--font-mono,monospace); }
+.int-bulk-confirm-list tr:last-child td { border-bottom:none; }
+.int-bulk-confirm-actions { display:flex; gap:10px; }
+
+/* ── Results table enhancements ── */
+.int-results-table th.col-cb { width:30px; }
+.int-results-table th.col-id { width:48px; }
+.int-results-table td { vertical-align:middle; }
+.int-results-table input[type=checkbox] { cursor:pointer; width:14px; height:14px; }
+
+/* ── Check results (kept from v0.5.0) ── */
 .int-check-results { margin-top:18px; }
 .int-results-summary { display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:12px 16px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; margin-bottom:14px; font-size:13px; }
 .int-results-total { font-weight:700; color:var(--text); margin-right:4px; }
@@ -548,6 +852,7 @@ require __DIR__ . '/../../../includes/version.php';
 .int-results-table tr:last-child td { border-bottom:none; }
 .int-results-table tr.sev-suspicious td { background:rgba(220,38,38,.04); }
 .int-results-table tr.sev-info td { background:rgba(37,99,235,.03); }
+.int-results-table tr.is-actioned td { opacity:.55; }
 .int-sev-badge { display:inline-block; padding:2px 7px; border-radius:4px; font-size:10px; font-weight:700; letter-spacing:.04em; white-space:nowrap; }
 .int-sev-badge.suspicious { background:#fee2e2; color:#dc2626; }
 .int-sev-badge.warning    { background:#fff7ed; color:#d97706; }
@@ -555,8 +860,6 @@ require __DIR__ . '/../../../includes/version.php';
 .int-result-type { font-family:var(--font-mono,monospace); font-size:11px; font-weight:700; color:var(--text); white-space:nowrap; }
 .int-result-rel  { font-family:var(--font-mono,monospace); font-size:12px; color:var(--text); word-break:break-all; }
 .int-result-full { font-family:var(--font-mono,monospace); font-size:10px; color:var(--text-muted); word-break:break-all; margin-top:2px; }
-.int-btn-ignore { background:none; border:1px solid var(--border); border-radius:5px; padding:4px 9px; font-size:11px; color:var(--text-muted); cursor:pointer; white-space:nowrap; transition:background .12s, color .12s, border-color .12s; }
-.int-btn-ignore:hover { background:#fef3c7; border-color:#d97706; color:#92400e; }
 .int-truncated-note { padding:10px 14px; font-size:11px; color:#b45309; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; margin-top:12px; }
 .int-no-findings { padding:20px 16px; font-size:13px; color:#16a34a; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:8px; font-weight:600; margin-top:14px; }
 .int-check-context { display:flex; flex-wrap:wrap; gap:16px; padding:10px 14px; background:var(--surface2); border:1px solid var(--border); border-radius:7px; margin-bottom:14px; font-size:11px; }
@@ -585,7 +888,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   <div class="topbar">
     <div class="topbar-title">8Core Integrity</div>
     <div class="topbar-meta">
-      <span style="font-size:12px;color:var(--text-muted);">v0.5.0</span>
+      <span style="font-size:12px;color:var(--text-muted);">v0.6.0</span>
       &nbsp;&nbsp;<a href="../logout.php" style="color:var(--text-muted);font-size:12px;">Odjava</a>
     </div>
   </div>
@@ -996,10 +1299,293 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
           Structural check compares file/folder existence only. Hash comparison will be available in a future version.
         </div>
 
-        <?php if ($_intCheckResults): $cr = $_intCheckResults; ?>
+        <?php
+        // ── Bulk confirm screen ────────────────────────────────────────────────
+        if ($_intBulkConfirm):
+            $bc      = $_intBulkConfirm;
+            $bcLabel = $bc['action'] === 'trash' ? 'Move to Integrity Trash' : 'Ignore in Integrity';
+        ?>
+        <div class="int-bulk-confirm">
+          <div class="int-bulk-confirm-title">Confirm bulk action: <?= h($bcLabel) ?> — <?= count($bc['rows']) ?> item(s)</div>
+          <div class="int-bulk-confirm-list">
+            <table>
+              <thead><tr><th>ID</th><th>Severity</th><th>Type</th><th>Relative path</th></tr></thead>
+              <tbody>
+                <?php foreach ($bc['rows'] as $bcr): ?>
+                <tr>
+                  <td><?= (int)$bcr['id'] ?></td>
+                  <td><span class="int-sev-badge <?= h($bcr['severity']) ?>"><?= strtoupper(h($bcr['severity'])) ?></span></td>
+                  <td><span class="int-result-type"><?= h($bcr['type']) ?></span></td>
+                  <td><?= h($bcr['relative_path']) ?></td>
+                </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
+          <div class="int-bulk-confirm-actions">
+            <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
+              <input type="hidden" name="action"       value="bulk_execute">
+              <input type="hidden" name="run_id"       value="<?= (int)$bc['run_id'] ?>">
+              <input type="hidden" name="bulk_action"  value="<?= h($bc['action']) ?>">
+              <?php foreach ($bc['filters'] as $fk => $fv): ?>
+              <input type="hidden" name="<?= h($fk) ?>" value="<?= h($fv) ?>">
+              <?php endforeach; ?>
+              <?php foreach ($bc['rows'] as $bcr): ?>
+              <input type="hidden" name="confirmed_ids[]" value="<?= (int)$bcr['id'] ?>">
+              <?php endforeach; ?>
+              <?= csrf_field() ?>
+              <button type="submit" class="btn btn-danger"><?= h($bcLabel) ?></button>
+            </form>
+            <a href="<?= h(_int_build_check_url($bc['run_id'], $bc['filters'])) ?>" class="btn btn-ghost">Cancel</a>
+          </div>
+        </div>
+        <?php endif; ?>
+
+        <?php
+        // ── Persisted run results ──────────────────────────────────────────────
+        if ($_intRunId > 0 && $_intRunMeta && $_intRunResults !== null):
+            $meta    = $_intRunMeta;
+            $results = $_intRunResults;
+            $tabBase = $_intTabBase . '&tab=check&run_id=' . $_intRunId;
+        ?>
         <div class="int-check-results">
 
-          <!-- Context bar -->
+          <!-- Run info bar -->
+          <div class="int-run-bar">
+            <div class="int-run-bar-item">
+              <div class="int-run-bar-label">Run #<?= (int)$meta['id'] ?></div>
+              <div class="int-run-bar-val"><?= h(date('Y-m-d H:i', strtotime($meta['created_at']))) ?></div>
+            </div>
+            <div class="int-run-bar-sep"></div>
+            <div class="int-run-bar-item">
+              <div class="int-run-bar-label">Origin</div>
+              <div class="int-run-bar-val"><?= h($meta['origin_path']) ?></div>
+            </div>
+            <div class="int-run-bar-item">
+              <div class="int-run-bar-label">Destination</div>
+              <div class="int-run-bar-val"><?= h($meta['destination_path']) ?></div>
+            </div>
+            <?php if ($meta['software']): ?>
+            <div class="int-run-bar-item">
+              <div class="int-run-bar-label">Software</div>
+              <div class="int-run-bar-val"><?= h($meta['software']) ?></div>
+            </div>
+            <?php endif; ?>
+            <div class="int-run-bar-sep"></div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+              <?php if ($meta['suspicious'] > 0): ?>
+                <span class="int-sev-tag is-suspicious"><?= (int)$meta['suspicious'] ?> suspicious</span>
+              <?php endif; ?>
+              <?php if ($meta['warnings'] > 0): ?>
+                <span class="int-sev-tag is-warning"><?= (int)$meta['warnings'] ?> warning<?= $meta['warnings'] != 1 ? 's' : '' ?></span>
+              <?php endif; ?>
+              <?php if ($meta['info'] > 0): ?>
+                <span class="int-sev-tag is-info"><?= (int)$meta['info'] ?> info</span>
+              <?php endif; ?>
+              <span style="font-size:11px;color:var(--text-muted);"><?= (int)$meta['total'] ?> total</span>
+            </div>
+          </div>
+
+          <!-- Filter bar -->
+          <form method="get" action="module.php" id="int-filter-form" class="int-filter-bar">
+            <input type="hidden" name="module"  value="8core-integrity">
+            <input type="hidden" name="page"    value="module_integrity">
+            <input type="hidden" name="tab"     value="check">
+            <input type="hidden" name="run_id"  value="<?= (int)$_intRunId ?>">
+            <div>
+              <label>Type</label>
+              <select name="ft">
+                <option value="">All types</option>
+                <?php foreach (['EXTRA_FILE','EXTRA_DIRECTORY','MISSING_FILE','MISSING_DIRECTORY','USER_CONTENT_FOLDER'] as $ft): ?>
+                <option value="<?= h($ft) ?>" <?= ($_intRunFilters['type'] ?? '') === $ft ? 'selected' : '' ?>><?= h($ft) ?></option>
+                <?php endforeach; ?>
+              </select>
+            </div>
+            <div>
+              <label>Severity</label>
+              <select name="fs">
+                <option value="">All</option>
+                <option value="suspicious" <?= ($_intRunFilters['severity'] ?? '') === 'suspicious' ? 'selected' : '' ?>>Suspicious</option>
+                <option value="warning"    <?= ($_intRunFilters['severity'] ?? '') === 'warning'    ? 'selected' : '' ?>>Warning</option>
+                <option value="info"       <?= ($_intRunFilters['severity'] ?? '') === 'info'       ? 'selected' : '' ?>>Info</option>
+              </select>
+            </div>
+            <div>
+              <label>Status</label>
+              <select name="fst">
+                <option value="">All</option>
+                <option value="new"               <?= ($_intRunFilters['status'] ?? '') === 'new'               ? 'selected' : '' ?>>New</option>
+                <option value="ignored_integrity" <?= ($_intRunFilters['status'] ?? '') === 'ignored_integrity' ? 'selected' : '' ?>>Ignored</option>
+                <option value="trashed"           <?= ($_intRunFilters['status'] ?? '') === 'trashed'           ? 'selected' : '' ?>>Trashed</option>
+                <option value="replaced"          <?= ($_intRunFilters['status'] ?? '') === 'replaced'          ? 'selected' : '' ?>>Replaced</option>
+                <option value="failed"            <?= ($_intRunFilters['status'] ?? '') === 'failed'            ? 'selected' : '' ?>>Failed</option>
+              </select>
+            </div>
+            <div>
+              <label>Path contains</label>
+              <input type="text" name="fp" value="<?= h($_intRunFilters['path'] ?? '') ?>" placeholder="e.g. administrator">
+            </div>
+            <button type="submit" class="btn btn-ghost" style="font-size:12px;padding:6px 12px;align-self:flex-end;">Filter</button>
+            <?php if (array_filter($_intRunFilters)): ?>
+            <a href="<?= h($_intTabBase . '&tab=check&run_id=' . $_intRunId) ?>" class="int-filter-reset">Clear filters</a>
+            <?php endif; ?>
+          </form>
+
+          <?php if (empty($results)): ?>
+          <div class="int-no-findings">No results match the current filters.</div>
+          <?php else: ?>
+
+          <!-- Bulk action bar -->
+          <form method="post" action="<?= h($_intTabBase) ?>&tab=check" id="int-bulk-form">
+            <input type="hidden" name="action"   value="bulk_preview">
+            <input type="hidden" name="run_id"   value="<?= (int)$_intRunId ?>">
+            <?php foreach (_int_filters_to_get($_intRunFilters) as $fk => $fv): ?>
+            <input type="hidden" name="<?= h($fk) ?>" value="<?= h($fv) ?>">
+            <?php endforeach; ?>
+            <?= csrf_field() ?>
+
+            <!-- Selection controls -->
+            <div class="int-sel-bar">
+              <button type="button" class="int-sel-btn" id="int-sel-all">Check all</button>
+              <button type="button" class="int-sel-btn" id="int-sel-none">Uncheck all</button>
+              <span class="int-bulk-counter" id="int-sel-count" style="margin-left:4px;"><strong>0</strong> selected</span>
+            </div>
+
+            <div class="int-bulk-bar">
+              <div>
+                <label>Bulk action</label>
+                <select name="bulk_action" id="int-bulk-action">
+                  <option value="">— select action —</option>
+                  <option value="ignore">Ignore in Integrity</option>
+                  <option value="trash">Move to Integrity Trash (EXTRA only)</option>
+                </select>
+              </div>
+              <div style="display:flex;flex-direction:column;">
+                <label>Select mode</label>
+                <select name="select_mode" id="int-select-mode">
+                  <option value="checked">Use checked rows</option>
+                  <option value="range">Use ID range</option>
+                </select>
+              </div>
+              <div class="int-bulk-id-group" id="int-id-range-group" style="display:none;">
+                <label>ID range</label>
+                <input type="text" name="id_range" class="int-bulk-id-input" placeholder="1,5,10-20,33" id="int-id-range">
+                <div class="int-bulk-id-hint">e.g. 1,5,10-20,33</div>
+              </div>
+              <button type="submit" class="btn btn-primary" id="int-bulk-apply" style="align-self:flex-end;" disabled>Apply</button>
+            </div>
+
+          <!-- Results table (inside the bulk form) -->
+          <div class="int-results-wrap">
+            <table class="int-results-table" id="int-results-table">
+              <thead>
+                <tr>
+                  <th class="col-cb"><input type="checkbox" id="int-cb-all" title="Toggle all"></th>
+                  <th class="col-id">ID</th>
+                  <th>Severity</th>
+                  <th>Type</th>
+                  <th>Path</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($results as $r):
+                  $isActioned = $r['status'] !== 'new';
+                  $isExtra    = str_starts_with($r['type'], 'EXTRA_');
+                  $isMissing  = str_starts_with($r['type'], 'MISSING_');
+                ?>
+                <tr class="sev-<?= h($r['severity']) ?><?= $isActioned ? ' is-actioned' : '' ?>">
+                  <td>
+                    <?php if (!$isActioned): ?>
+                    <input type="checkbox" name="result_ids[]" value="<?= (int)$r['id'] ?>" class="int-row-cb">
+                    <?php endif; ?>
+                  </td>
+                  <td style="font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-muted);"><?= (int)$r['id'] ?></td>
+                  <td><span class="int-sev-badge <?= h($r['severity']) ?>"><?= strtoupper(h($r['severity'])) ?></span></td>
+                  <td><span class="int-result-type"><?= h($r['type']) ?></span></td>
+                  <td>
+                    <div class="int-result-rel"><?= h($r['relative_path']) ?></div>
+                    <div class="int-result-full"><?= h($r['full_path']) ?></div>
+                  </td>
+                  <td>
+                    <span class="int-status-badge <?= h($r['status']) ?>"><?= h(str_replace('_', ' ', $r['status'])) ?></span>
+                    <?php if ($r['note'] && $r['status'] === 'trashed'): ?>
+                    <div style="font-size:10px;color:var(--text-muted);margin-top:2px;word-break:break-all;"><?= h($r['note']) ?></div>
+                    <?php endif; ?>
+                  </td>
+                  <td>
+                    <?php if (!$isActioned): ?>
+                    <div class="int-row-actions">
+                      <!-- Ignore -->
+                      <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
+                        <input type="hidden" name="action"        value="action_result">
+                        <input type="hidden" name="run_id"        value="<?= (int)$_intRunId ?>">
+                        <input type="hidden" name="result_id"     value="<?= (int)$r['id'] ?>">
+                        <input type="hidden" name="result_action" value="ignore">
+                        <?php foreach (_int_filters_to_get($_intRunFilters) as $fk => $fv): ?>
+                        <input type="hidden" name="<?= h($fk) ?>" value="<?= h($fv) ?>">
+                        <?php endforeach; ?>
+                        <?= csrf_field() ?>
+                        <button type="button" class="int-btn-act act-ignore"
+                                onclick="if(confirm('Ignore &quot;<?= h(addslashes($r['relative_path'])) ?>&quot; in Integrity checks?')) this.closest('form').submit()">
+                          Ignore
+                        </button>
+                      </form>
+                      <?php if ($isExtra): ?>
+                      <!-- Trash -->
+                      <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
+                        <input type="hidden" name="action"        value="action_result">
+                        <input type="hidden" name="run_id"        value="<?= (int)$_intRunId ?>">
+                        <input type="hidden" name="result_id"     value="<?= (int)$r['id'] ?>">
+                        <input type="hidden" name="result_action" value="trash">
+                        <?php foreach (_int_filters_to_get($_intRunFilters) as $fk => $fv): ?>
+                        <input type="hidden" name="<?= h($fk) ?>" value="<?= h($fv) ?>">
+                        <?php endforeach; ?>
+                        <?= csrf_field() ?>
+                        <button type="button" class="int-btn-act act-trash"
+                                onclick="if(confirm('Move &quot;<?= h(addslashes($r['relative_path'])) ?>&quot; to Integrity Trash?')) this.closest('form').submit()">
+                          Trash
+                        </button>
+                      </form>
+                      <?php endif; ?>
+                      <?php if ($isMissing): ?>
+                      <!-- Replace from origin -->
+                      <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
+                        <input type="hidden" name="action"        value="action_result">
+                        <input type="hidden" name="run_id"        value="<?= (int)$_intRunId ?>">
+                        <input type="hidden" name="result_id"     value="<?= (int)$r['id'] ?>">
+                        <input type="hidden" name="result_action" value="replace">
+                        <?php foreach (_int_filters_to_get($_intRunFilters) as $fk => $fv): ?>
+                        <input type="hidden" name="<?= h($fk) ?>" value="<?= h($fv) ?>">
+                        <?php endforeach; ?>
+                        <?= csrf_field() ?>
+                        <button type="button" class="int-btn-act act-replace"
+                                onclick="if(confirm('Replace &quot;<?= h(addslashes($r['relative_path'])) ?>&quot; from origin?')) this.closest('form').submit()">
+                          Replace
+                        </button>
+                      </form>
+                      <?php endif; ?>
+                    </div>
+                    <?php else: ?>
+                    <span style="font-size:11px;color:var(--text-muted);">—</span>
+                    <?php endif; ?>
+                  </td>
+                </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div><!-- /.int-results-wrap -->
+          </form><!-- /#int-bulk-form -->
+
+          <?php endif; ?>
+
+        </div><!-- /.int-check-results -->
+
+        <?php
+        // ── In-memory fallback (no DB) ─────────────────────────────────────────
+        elseif (isset($_intCheckResults) && $_intCheckResults): $cr = $_intCheckResults; ?>
+        <div class="int-check-results">
           <div class="int-check-context">
             <div class="int-check-context-item">
               <span class="int-check-context-label">Origin</span>
@@ -1009,19 +1595,10 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               <span class="int-check-context-label">Destination</span>
               <span class="int-check-context-val"><?= h($cr['dest']) ?></span>
             </div>
-            <?php if ($_intDetSoftware && $_intDetSoftware !== 'Unknown'): ?>
-            <div class="int-check-context-item">
-              <span class="int-check-context-label">Software</span>
-              <span class="int-check-context-val"><?= h($_intDetSoftware) ?></span>
-            </div>
-            <?php endif; ?>
           </div>
-
           <?php if (empty($cr['findings'])): ?>
           <div class="int-no-findings">No structural differences found.</div>
           <?php else: ?>
-
-          <!-- Summary bar -->
           <div class="int-results-summary">
             <span class="int-results-total"><?= number_format(count($cr['findings'])) ?> finding<?= count($cr['findings']) !== 1 ? 's' : '' ?></span>
             <?php if ($cr['counts']['suspicious'] > 0): ?>
@@ -1034,66 +1611,27 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               <span class="int-sev-tag is-info"><?= number_format($cr['counts']['info']) ?> info</span>
             <?php endif; ?>
           </div>
-
-          <!-- Results table -->
           <div class="int-results-wrap">
             <table class="int-results-table">
-              <thead>
-                <tr>
-                  <th>Severity</th>
-                  <th>Type</th>
-                  <th>Path</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
+              <thead><tr><th>Severity</th><th>Type</th><th>Path</th></tr></thead>
               <tbody>
                 <?php foreach ($cr['findings'] as $f): ?>
                 <tr class="sev-<?= h($f['severity']) ?>">
-                  <td>
-                    <span class="int-sev-badge <?= h($f['severity']) ?>">
-                      <?= strtoupper(h($f['severity'])) ?>
-                    </span>
-                  </td>
+                  <td><span class="int-sev-badge <?= h($f['severity']) ?>"><?= strtoupper(h($f['severity'])) ?></span></td>
                   <td><span class="int-result-type"><?= h($f['type']) ?></span></td>
                   <td>
                     <div class="int-result-rel"><?= h($f['rel']) ?></div>
                     <div class="int-result-full"><?= h($f['fullpath']) ?></div>
-                  </td>
-                  <td>
-                    <?php if ($f['type'] !== 'USER_CONTENT_FOLDER'): ?>
-                    <form method="post"
-                          action="module.php?module=8core-integrity&page=module_integrity&tab=check"
-                          style="display:inline">
-                      <input type="hidden" name="action"            value="add_integrity_ignore">
-                      <input type="hidden" name="origin_path"       value="<?= h($cr['origin']) ?>">
-                      <input type="hidden" name="dest_path"         value="<?= h($cr['dest']) ?>">
-                      <input type="hidden" name="ignored_path"      value="<?= h($f['rel']) ?>">
-                      <input type="hidden" name="ignore_type"       value="<?= str_contains($f['type'], 'MISSING') ? 'missing_path' : 'extra_path' ?>">
-                      <input type="hidden" name="detected_software" value="<?= h($_intDetSoftware) ?>">
-                      <?= csrf_field() ?>
-                      <button type="button" class="int-btn-ignore"
-                              onclick="if(confirm('Ignore \&quot;<?= h(addslashes($f['rel'])) ?>\&quot; in Integrity checks for this destination?')) this.closest('form').submit()">
-                        Ignore in Integrity
-                      </button>
-                    </form>
-                    <?php else: ?>
-                    <span style="font-size:11px;color:var(--text-muted);">User content</span>
-                    <?php endif; ?>
                   </td>
                 </tr>
                 <?php endforeach; ?>
               </tbody>
             </table>
           </div>
-
           <?php endif; ?>
-
           <?php if ($cr['truncated']): ?>
-          <div class="int-truncated-note">
-            Result truncated: installation exceeds 20,000 items. Only the first items are shown.
-          </div>
+          <div class="int-truncated-note">Result truncated: installation exceeds 20,000 items.</div>
           <?php endif; ?>
-
         </div>
         <?php endif; ?>
       </div>
@@ -1331,6 +1869,68 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
       .replace(/&/g,'&amp;').replace(/</g,'&lt;')
       .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
+})();
+
+// ── Bulk selection ─────────────────────────────────────────────────────────────
+(function () {
+  'use strict';
+
+  var selAll      = document.getElementById('int-sel-all');
+  var selNone     = document.getElementById('int-sel-none');
+  var selCount    = document.getElementById('int-sel-count');
+  var bulkAction  = document.getElementById('int-bulk-action');
+  var bulkApply   = document.getElementById('int-bulk-apply');
+  var selectMode  = document.getElementById('int-select-mode');
+  var idRangeGrp  = document.getElementById('int-id-range-group');
+  var idRangeInp  = document.getElementById('int-id-range');
+
+  if (!bulkApply) return; // no results on page
+
+  function getCheckboxes() {
+    return Array.from(document.querySelectorAll('.int-row-cb'));
+  }
+
+  function updateCount() {
+    var n = getCheckboxes().filter(function(c) { return c.checked; }).length;
+    if (selCount) selCount.innerHTML = '<strong>' + n + '</strong> selected';
+    updateApplyState();
+  }
+
+  function updateApplyState() {
+    var hasAction = bulkAction && bulkAction.value !== '';
+    var isRange   = selectMode && selectMode.value === 'range';
+    var hasRange  = idRangeInp && idRangeInp.value.trim() !== '';
+    var hasChecked = getCheckboxes().some(function(c) { return c.checked; });
+
+    var canApply  = hasAction && (isRange ? hasRange : hasChecked);
+    if (bulkApply) bulkApply.disabled = !canApply;
+  }
+
+  if (selAll) selAll.addEventListener('click', function () {
+    getCheckboxes().forEach(function(c) { c.checked = true; });
+    updateCount();
+  });
+
+  if (selNone) selNone.addEventListener('click', function () {
+    getCheckboxes().forEach(function(c) { c.checked = false; });
+    updateCount();
+  });
+
+  getCheckboxes().forEach(function(c) {
+    c.addEventListener('change', updateCount);
+  });
+
+  if (bulkAction) bulkAction.addEventListener('change', updateApplyState);
+
+  if (selectMode) selectMode.addEventListener('change', function () {
+    var isRange = this.value === 'range';
+    if (idRangeGrp) idRangeGrp.style.display = isRange ? '' : 'none';
+    updateApplyState();
+  });
+
+  if (idRangeInp) idRangeInp.addEventListener('input', updateApplyState);
+
+  updateCount();
 })();
 </script>
 </body>

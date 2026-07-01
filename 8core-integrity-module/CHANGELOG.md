@@ -1,6 +1,44 @@
 # 8Core Integrity — Changelog
 
-## [0.5.0] — 2026-07-01
+## [0.6.0] — 2026-07-01
+
+### Added
+
+- `install/migrations/20260701_007_add_integrity_results.sql`: new `scanner_integrity_runs` and `scanner_integrity_results` tables
+- `includes/integrity.php` — `integrity_ensure_tables()` now also creates `scanner_integrity_runs` and `scanner_integrity_results`
+- `includes/integrity.php` — `integrity_save_run()`: persists a structural check run to `scanner_integrity_runs`, returns run_id
+- `includes/integrity.php` — `integrity_save_results()`: bulk-inserts findings for a run into `scanner_integrity_results`
+- `includes/integrity.php` — `integrity_load_run()`, `integrity_load_results()`, `integrity_load_results_by_ids()`, `integrity_update_result_status()`: run and result data access
+- `includes/integrity.php` — `integrity_trash_root()`, `integrity_do_trash_path()`: Integrity Trash — moves EXTRA paths to `/home/8core_integrity/trash/YYYYMMDD-HHMMSS/<relative_path>` via `rename()`; path safety: realpath inside /home, matches destRoot + relativePath
+- `includes/integrity.php` — `integrity_do_replace_path()`: copies MISSING path from origin to destination; refuses to overwrite, rejects path traversal, guards both roots
+- `admin/module_integrity.php` — `run_structural_check` POST handler now saves run + results to DB, then PRG-redirects to `?run_id=<id>`
+- `admin/module_integrity.php` — `action_result` POST handler: single-row Ignore / Trash / Replace actions with PRG redirect
+- `admin/module_integrity.php` — `bulk_preview` POST handler: validates and renders two-step confirm screen before destructive bulk operations
+- `admin/module_integrity.php` — `bulk_execute` POST handler: executes confirmed bulk Ignore or Trash, PRG-redirects
+- `admin/module_integrity.php` — flash messages via `$_SESSION['8int_flash']` (set before PRG, drained on GET render)
+- `admin/module_integrity.php` — helper functions: `_int_flash_set()`, `_int_flash_drain()`, `_int_build_check_url()`, `_int_filters_from_get()`, `_int_filters_to_get()`, `_int_parse_id_range()`
+- `admin/module_integrity.php` — results UI: run info bar (run #, date, origin, destination, software, severity counts)
+- `admin/module_integrity.php` — filter bar: Type / Severity / Status / Path contains (GET-param driven, URL-preserving)
+- `admin/module_integrity.php` — results table: ID, checkbox, Severity, Type, Relative path + Full path, Status (with badge), Actions columns
+- `admin/module_integrity.php` — row actions: Ignore (all non-USER_CONTENT), Trash (EXTRA only), Replace (MISSING only), each with `confirm()` dialog
+- `admin/module_integrity.php` — bulk action bar: action dropdown, select mode (checked rows / ID range), ID range input (supports `1,5,10-20,33` syntax), Apply button (disabled until valid selection)
+- `admin/module_integrity.php` — bulk confirm screen: lists affected rows in amber panel before destructive execute
+- `admin/module_integrity.php` — status badges: new / ignored_integrity / trashed / replaced / failed
+- `admin/module_integrity.php` — in-memory fallback: if DB save fails, results stored in `$_SESSION['8int_inmem']` and shown without row actions
+- `admin/module_integrity.php` — JS bulk selection: Check all, Uncheck all, selection counter, ID range show/hide, Apply button enable/disable
+
+### Changed
+
+- `admin/module_integrity.php` — version bumped to `0.6.0`
+- `module.php` — version bumped to `0.6.0`
+
+### Not implemented (planned)
+
+- Hash comparison (file content integrity)
+- Malware scan integration
+- Scanner worker integration
+
+
 
 ### Added
 
