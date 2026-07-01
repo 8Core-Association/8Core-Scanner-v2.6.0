@@ -452,8 +452,13 @@ require __DIR__ . '/../../../includes/version.php';
 .int-bc-link:hover { background:rgba(37,99,235,.08); }
 .int-bc-sep { color:var(--border); margin:0 1px; }
 .int-modal-body { flex:1; overflow-y:auto; padding:8px 0; min-height:120px; }
-.int-browse-loading,.int-browse-error,.int-browse-empty { padding:20px 18px; font-size:13px; color:var(--text-muted); }
-.int-browse-error { color:#dc2626; }
+.int-browse-loading,.int-browse-empty { padding:20px 18px; font-size:13px; color:var(--text-muted); }
+.int-browse-error { padding:12px 18px; }
+.int-browse-error-msg { color:#dc2626; font-size:13px; margin-bottom:10px; }
+.int-browse-navi { display:flex; gap:6px; margin-top:10px; }
+.int-browse-navi input[type=text] { flex:1; padding:7px 10px; border:1px solid var(--border); border-radius:6px; font-family:var(--font-mono,monospace); font-size:12px; background:var(--surface2,#f8fafc); color:var(--text); outline:none; }
+.int-browse-navi input[type=text]:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.18); }
+.int-browse-navi-hint { font-size:11px; color:var(--text-muted); margin-top:6px; }
 .int-dir-list { list-style:none; margin:0; padding:0; }
 .int-dir-item { display:flex; align-items:center; gap:9px; padding:8px 18px; cursor:pointer; font-size:13px; color:var(--text); transition:background .1s; user-select:none; }
 .int-dir-item:hover { background:var(--surface2,#f8fafc); }
@@ -967,6 +972,29 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   }
 
   // ── Load directory ────────────────────────────────────────────────────────
+  function naviHtml(msg, prefill) {
+    return '<div class="int-browse-error">'
+      + (msg ? '<div class="int-browse-error-msg">' + escHtml(msg) + '</div>' : '')
+      + '<div class="int-browse-navi">'
+      + '<input type="text" id="int-navi-input" placeholder="/home/username/public_html" value="' + escHtml(prefill || '') + '">'
+      + '<button type="button" class="btn btn-ghost" style="font-size:12px;padding:7px 12px;" id="int-navi-go">Go</button>'
+      + '</div>'
+      + '<div class="int-browse-navi-hint">Type a path inside /home and press Go to navigate directly.</div>'
+      + '</div>';
+  }
+
+  function bindNaviGo() {
+    var inp = document.getElementById('int-navi-input');
+    var btn = document.getElementById('int-navi-go');
+    if (!inp || !btn) return;
+    function go() {
+      var v = inp.value.trim();
+      if (v) loadDir(v);
+    }
+    btn.addEventListener('click', go);
+    inp.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+  }
+
   function loadDir(path) {
     bodyEl.innerHTML = '<div class="int-browse-loading">Loading&hellip;</div>';
     selectedPath = path;
@@ -976,12 +1004,17 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
 
     post('browse_dir', { path: path }, function (err, data) {
       if (err || !data.ok) {
-        bodyEl.innerHTML = '<div class="int-browse-error">'
-          + escHtml(err || data.error || 'Error') + '</div>';
+        var msg  = err || data.error || 'Error';
+        var hint = (path === '/home')
+          ? 'PHP cannot list /home directly. Enter a known user path, e.g. /home/username.'
+          : msg;
+        bodyEl.innerHTML = naviHtml(hint, path === '/home' ? '/home/' : path);
+        bindNaviGo();
         return;
       }
       if (data.entries.length === 0) {
-        bodyEl.innerHTML = '<div class="int-browse-empty">No subdirectories.</div>';
+        bodyEl.innerHTML = naviHtml('No subdirectories found in ' + path + '.', path);
+        bindNaviGo();
         return;
       }
       var html = '<ul class="int-dir-list">';
