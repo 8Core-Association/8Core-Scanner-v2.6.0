@@ -712,6 +712,27 @@ function integrity_ensure_tables(PDO $pdo): bool {
             }
         }
 
+        // Action queue table — v1.0.0
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS `scanner_integrity_actions` (
+               `id`            INT           NOT NULL AUTO_INCREMENT,
+               `result_id`     INT           NOT NULL,
+               `action`        VARCHAR(50)   NOT NULL,
+               `status`        VARCHAR(50)   NOT NULL DEFAULT \'pending\',
+               `source_path`   VARCHAR(1024) NOT NULL,
+               `target_path`   VARCHAR(1024) NOT NULL,
+               `relative_path` VARCHAR(1024) NOT NULL,
+               `requested_by`  VARCHAR(190)  NULL,
+               `error_message` TEXT          NULL,
+               `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               `executed_at`   DATETIME      NULL,
+               PRIMARY KEY (`id`),
+               KEY `idx_result_id` (`result_id`),
+               KEY `idx_status`    (`status`),
+               KEY `idx_action`    (`action`)
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+
         return true;
     } catch (PDOException $e) {
         return false;
@@ -1767,6 +1788,7 @@ function integrity_load_latest_run_for_dest(PDO $pdo, string $dest): ?array {
  * Deletes only the results and associated actions for a run — keeps the run row.
  */
 function integrity_clear_run_results_only(PDO $pdo, int $runId): bool {
+    integrity_ensure_tables($pdo);
     try {
         $pdo->prepare(
             'DELETE a FROM scanner_integrity_actions a
@@ -1785,6 +1807,7 @@ function integrity_clear_run_results_only(PDO $pdo, int $runId): bool {
  * Optionally deletes the run log file and/or action log files.
  */
 function integrity_delete_run(PDO $pdo, int $runId, bool $alsoRunLog = false, bool $alsoActionLogs = false): bool {
+    integrity_ensure_tables($pdo);
     try {
         if ($alsoActionLogs) {
             $stmt = $pdo->prepare(
@@ -1820,6 +1843,7 @@ function integrity_delete_run(PDO $pdo, int $runId, bool $alsoRunLog = false, bo
  * Optionally deletes associated log files.
  */
 function integrity_delete_dest_runs(PDO $pdo, string $dest, bool $alsoRunLogs = false, bool $alsoActionLogs = false): bool {
+    integrity_ensure_tables($pdo);
     try {
         $runIds = [];
         if ($alsoRunLogs || $alsoActionLogs) {
@@ -1868,29 +1892,56 @@ function integrity_delete_dest_runs(PDO $pdo, string $dest, bool $alsoRunLogs = 
 /**
  * Deletes ALL integrity runs and results across all destinations.
  * Does NOT delete: repo hashes, ignores, exclusion templates, trash files.
+ *
+ * Returns ['ok' => bool, 'error' => string|null, 'runs' => int, 'results' => int, 'actions' => int]
  */
-function integrity_delete_all_runs(PDO $pdo, bool $alsoRunLogs = false, bool $alsoActionLogs = false): bool {
+function integrity_delete_all_runs(PDO $pdo, bool $alsoRunLogs = false, bool $alsoActionLogs = false): array {
+    // Ensure actions table exists before we touch it
+    integrity_ensure_tables($pdo);
+
     try {
+        // Collect log file paths before deleting rows
         if ($alsoActionLogs) {
-            $st = $pdo->query('SELECT id FROM scanner_integrity_actions');
-            foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $aId) {
+            foreach ($pdo->query('SELECT id FROM scanner_integrity_actions')->fetchAll(PDO::FETCH_COLUMN) as $aId) {
                 $p = integrity_action_log_path((int)$aId);
                 if (file_exists($p)) @unlink($p);
             }
         }
         if ($alsoRunLogs) {
-            $st = $pdo->query('SELECT id FROM scanner_integrity_runs');
-            foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $runId) {
+            foreach ($pdo->query('SELECT id FROM scanner_integrity_runs')->fetchAll(PDO::FETCH_COLUMN) as $runId) {
                 $p = integrity_run_log_path((int)$runId);
                 if (file_exists($p)) @unlink($p);
             }
         }
+
+        $pdo->beginTransaction();
         $pdo->exec('DELETE FROM scanner_integrity_actions');
         $pdo->exec('DELETE FROM scanner_integrity_results');
         $pdo->exec('DELETE FROM scanner_integrity_runs');
-        return true;
+        $pdo->commit();
+
+        // Verify counts
+        $remRuns    = (int) $pdo->query('SELECT COUNT(*) FROM scanner_integrity_runs')->fetchColumn();
+        $remResults = (int) $pdo->query('SELECT COUNT(*) FROM scanner_integrity_results')->fetchColumn();
+        $remActions = (int) $pdo->query('SELECT COUNT(*) FROM scanner_integrity_actions')->fetchColumn();
+
+        if ($remRuns > 0 || $remResults > 0 || $remActions > 0) {
+            return [
+                'ok'      => false,
+                'error'   => 'Delete appeared to succeed but rows remain: runs=' . $remRuns . ' results=' . $remResults . ' actions=' . $remActions,
+                'runs'    => $remRuns,
+                'results' => $remResults,
+                'actions' => $remActions,
+            ];
+        }
+
+        return ['ok' => true, 'error' => null, 'runs' => 0, 'results' => 0, 'actions' => 0];
+
     } catch (PDOException $e) {
-        return false;
+        if ($pdo->inTransaction()) {
+            try { $pdo->rollBack(); } catch (PDOException $re) { /* ignore */ }
+        }
+        return ['ok' => false, 'error' => $e->getMessage(), 'runs' => -1, 'results' => -1, 'actions' => -1];
     }
 }
 

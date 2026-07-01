@@ -531,10 +531,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             header('Location: module.php?module=8core-integrity&page=module_integrity&tab=check');
             exit;
         }
-        $ok = integrity_delete_all_runs($pdo, $alsoRunLog, $alsoActionLog);
-        _int_flash_set($ok ? 'ok' : 'err', $ok
-            ? 'All Integrity run results deleted.'
-            : 'Failed to delete all runs.');
+        $result = integrity_delete_all_runs($pdo, $alsoRunLog, $alsoActionLog);
+        if ($result['ok']) {
+            _int_flash_set('ok', 'All Integrity run results deleted. No runs found.');
+        } else {
+            $errMsg = 'Delete all failed.';
+            if (!empty($result['error'])) {
+                $errMsg .= ' Error: ' . $result['error'];
+            }
+            if ($result['runs'] >= 0) {
+                $errMsg .= ' Remaining: runs=' . $result['runs'] . ' results=' . $result['results'] . ' actions=' . $result['actions'] . '.';
+            }
+            _int_flash_set('err', $errMsg);
+        }
         header('Location: module.php?module=8core-integrity&page=module_integrity&tab=check');
         exit;
     }
@@ -1412,6 +1421,7 @@ require __DIR__ . '/../../../includes/version.php';
 .int-run-bar-item { display:flex; flex-direction:column; min-width:0; }
 .int-run-bar-sep { border-left:1px solid var(--border); height:28px; align-self:center; }
 .int-run-bar-actions { margin-left:auto; display:flex; gap:6px; }
+.int-no-runs-notice { margin-top:18px; padding:16px 20px; background:#f8fafc; border:1px solid var(--border); border-radius:8px; font-size:13px; color:var(--text-muted); text-align:center; }
 
 /* ── Run selector ── */
 .int-run-selector-bar { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
@@ -2563,6 +2573,18 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
             <a href="<?= h(_int_build_check_url($bc['run_id'], $bc['filters'])) ?>" class="btn btn-ghost">Cancel</a>
           </div>
         </div>
+        <?php endif; ?>
+
+        <?php
+        // ── No-runs state ──────────────────────────────────────────────────────
+        if ($_intRunId === 0 && !$_intBulkConfirm && ($_GET['tab'] ?? '') === 'check'):
+            $__hasAnyRun = (integrity_load_latest_run($pdo) !== null);
+        ?>
+        <?php if (!$__hasAnyRun): ?>
+        <div class="int-no-runs-notice">
+          No Integrity runs found. Use the form above to run your first check.
+        </div>
+        <?php endif; ?>
         <?php endif; ?>
 
         <?php
