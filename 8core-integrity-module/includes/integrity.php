@@ -3,7 +3,78 @@
  * 8Core Integrity — helper functions
  */
 
-// ── Path / name validation ─────────────────────────────────────────────────────
+// ── Storage ────────────────────────────────────────────────────────────────────
+
+function integrity_storage_base(): string {
+    return '/home/8core_integrity';
+}
+
+/**
+ * Returns all top-level storage directories that must exist and be writable.
+ */
+function integrity_storage_dirs(): array {
+    $base = integrity_storage_base();
+    return [
+        $base,
+        $base . '/repo',
+        $base . '/trash',
+        $base . '/tmp',
+        $base . '/logs',
+    ];
+}
+
+/**
+ * Returns the running PHP process username.
+ * Tries posix_getpwuid first (most accurate), falls back to get_current_user().
+ */
+function integrity_php_user(): string {
+    if (function_exists('posix_getpwuid') && function_exists('posix_geteuid')) {
+        $info = posix_getpwuid(posix_geteuid());
+        if (!empty($info['name'])) return $info['name'];
+    }
+    $u = get_current_user();
+    return $u !== '' ? $u : 'www-data';
+}
+
+/**
+ * Returns status for each storage directory:
+ * ['path' => ..., 'exists' => bool, 'writable' => bool]
+ */
+function integrity_storage_status(): array {
+    $result = [];
+    foreach (integrity_storage_dirs() as $dir) {
+        $exists   = is_dir($dir);
+        $writable = $exists && is_writable($dir);
+        $result[] = ['path' => $dir, 'exists' => $exists, 'writable' => $writable];
+    }
+    return $result;
+}
+
+/**
+ * Returns true when all required storage directories exist and are writable.
+ */
+function integrity_storage_ready(): bool {
+    foreach (integrity_storage_status() as $s) {
+        if (!$s['exists'] || !$s['writable']) return false;
+    }
+    return true;
+}
+
+/**
+ * Generates the one-time shell setup command using the actual PHP user.
+ */
+function integrity_storage_setup_cmd(): string {
+    $base = integrity_storage_base();
+    $user = integrity_php_user();
+    return 'mkdir -p ' . escapeshellarg($base . '/repo') . ' \\'  . "\n"
+         . '         ' . escapeshellarg($base . '/trash') . ' \\'  . "\n"
+         . '         ' . escapeshellarg($base . '/tmp') . ' \\'    . "\n"
+         . '         ' . escapeshellarg($base . '/logs') . "\n\n"
+         . 'chown -R ' . escapeshellarg($user) . ':' . escapeshellarg($user) . ' ' . escapeshellarg($base) . "\n"
+         . 'chmod -R 750 ' . escapeshellarg($base);
+}
+
+
 
 function integrity_repo_root(): string {
     return '/home/8core_integrity/repo';
@@ -1202,7 +1273,7 @@ function integrity_load_results_by_ids(PDO $pdo, int $runId, array $ids): array 
  * Updates status (and optional note) for a single result row, scoped to a run.
  */
 function integrity_update_result_status(PDO $pdo, int $runId, int $resultId, string $status, string $note = ''): bool {
-    $allowed = ['new', 'ignored_integrity', 'replaced', 'trashed', 'failed', 'reviewed'];
+    $allowed = ['new', 'ignored_integrity', 'replaced', 'trashed', 'failed', 'reviewed', 'pending_action'];
     if (!in_array($status, $allowed, true)) return false;
     try {
         $stmt = $pdo->prepare(
@@ -1219,18 +1290,21 @@ function integrity_update_result_status(PDO $pdo, int $runId, int $resultId, str
 // ── Integrity Trash ────────────────────────────────────────────────────────────
 
 function integrity_trash_root(): string {
-    return '/home/8core_integrity/trash';
+    return integrity_storage_base() . '/trash';
 }
 
 /**
  * Moves a file or directory from its current location to the Integrity Trash.
- * Trash path: /home/8core_integrity/trash/YYYYMMDD-HHMMSS/<relative_path>
+ * Trash path: /home/8core_integrity/trash/YYYYMMDD-HHMMSS/<account>/<relative_path>
  * Safety: fullPath must be under /home and must match destRoot + / + relativePath.
  *
- * Returns ['ok' => bool, 'error' => string, 'trash_path' => string, 'root_cmd' => string].
+ * Returns:
+ *   ['ok' => true, 'trash_path' => string]                    — success
+ *   ['ok' => false, 'needs_queue' => true, 'error' => string, 'trash_path' => string]  — storage not ready / permission denied; caller should queue
+ *   ['ok' => false, 'needs_queue' => false, 'error' => string] — hard error (invalid path, not in /home, etc.)
  */
 function integrity_do_trash_path(string $fullPath, string $destRoot, string $relativePath): array {
-    $empty = ['ok' => false, 'error' => '', 'trash_path' => '', 'root_cmd' => ''];
+    $empty = ['ok' => false, 'needs_queue' => false, 'error' => '', 'trash_path' => '', 'root_cmd' => ''];
 
     $relativePath = ltrim($relativePath, '/');
     if ($relativePath === '' || str_contains($relativePath, '..')) {
@@ -1240,7 +1314,6 @@ function integrity_do_trash_path(string $fullPath, string $destRoot, string $rel
     // Safety: path must exist and be inside /home
     $real = realpath($fullPath);
     if ($real === false) {
-        // Check if the path simply doesn't exist vs permission denied
         $errMsg = file_exists($fullPath)
             ? 'Permission denied reading path: ' . $fullPath
             : 'Source path does not exist: ' . $fullPath;
@@ -1268,48 +1341,134 @@ function integrity_do_trash_path(string $fullPath, string $destRoot, string $rel
         return array_merge($empty, ['error' => 'Source path escapes destination root.']);
     }
 
+    // Extract account name from destination path for trash sub-directory
+    // e.g. /home/buckhr/public_html -> account = buckhr
+    $destParts = array_values(array_filter(explode('/', $realDestRoot)));
+    $account   = (count($destParts) >= 2 && $destParts[0] === 'home') ? $destParts[1] : 'unknown';
+
     $trashTs     = date('Ymd-His');
-    $trashDir    = integrity_trash_root() . '/' . $trashTs;
+    $trashRoot   = integrity_trash_root();
+    $trashDir    = $trashRoot . '/' . $trashTs . '/' . $account;
     $trashDest   = $trashDir . '/' . $relativePath;
     $trashParent = dirname($trashDest);
 
-    // Pre-flight: check if trash root parent exists/is writable
-    $trashRoot = integrity_trash_root();
-    if (!is_dir($trashRoot)) {
-        // Try to create it
-        if (!@mkdir($trashRoot, 0755, true)) {
-            $err = error_get_last();
-            $msg = 'Cannot create trash root "' . $trashRoot . '": ' . ($err['message'] ?? 'permission denied');
-            $rootCmd = 'mkdir -p ' . escapeshellarg($trashRoot) . "\n"
-                     . 'chown -R {webuser}:{webuser} ' . escapeshellarg(dirname($trashRoot));
-            return array_merge($empty, ['error' => $msg, 'root_cmd' => $rootCmd]);
-        }
+    // Storage not ready → signal caller to queue
+    if (!is_dir($trashRoot) || !is_writable($trashRoot)) {
+        return array_merge($empty, [
+            'needs_queue' => true,
+            'error'       => 'Integrity storage is not ready. Run one-time setup first.',
+            'trash_path'  => $trashDest,
+        ]);
     }
 
     if (!is_dir($trashParent) && !@mkdir($trashParent, 0755, true)) {
         $err = error_get_last();
-        $msg = 'Cannot create trash directory "' . $trashParent . '": ' . ($err['message'] ?? 'permission denied');
-        $rootCmd = 'mkdir -p ' . escapeshellarg($trashParent);
-        return array_merge($empty, ['error' => $msg, 'root_cmd' => $rootCmd]);
+        return array_merge($empty, [
+            'needs_queue' => true,
+            'error'       => 'Cannot create trash directory "' . $trashParent . '": ' . ($err['message'] ?? 'permission denied'),
+            'trash_path'  => $trashDest,
+        ]);
     }
 
     if (!@rename($real, $trashDest)) {
-        $err    = error_get_last();
-        $errMsg = $err['message'] ?? 'rename() failed';
-        // Diagnose: is source readable? Is trash parent writable?
+        $err     = error_get_last();
+        $errMsg  = $err['message'] ?? 'rename() failed';
         $details = [];
-        if (!is_readable($real))                $details[] = 'source not readable';
-        if (!is_writable(dirname($real)))       $details[] = 'source parent not writable';
-        if (!is_writable($trashParent))         $details[] = 'trash destination not writable';
-        if (!empty($details))                   $errMsg .= ' (' . implode('; ', $details) . ')';
-
-        $rootCmd = 'mkdir -p ' . escapeshellarg($trashParent) . "\n"
-                 . 'mv ' . escapeshellarg($real) . ' ' . escapeshellarg($trashDest) . "\n"
-                 . 'chown -R {webuser}:{webuser} ' . escapeshellarg($trashDir);
-        return array_merge($empty, ['error' => $errMsg, 'root_cmd' => $rootCmd]);
+        if (!is_readable($real))          $details[] = 'source not readable';
+        if (!is_writable(dirname($real))) $details[] = 'source parent not writable';
+        if (!is_writable($trashParent))   $details[] = 'trash destination not writable';
+        if (!empty($details))             $errMsg .= ' (' . implode('; ', $details) . ')';
+        return array_merge($empty, [
+            'needs_queue' => true,
+            'error'       => $errMsg,
+            'trash_path'  => $trashDest,
+        ]);
     }
 
-    return ['ok' => true, 'error' => '', 'trash_path' => $trashDest, 'root_cmd' => ''];
+    return ['ok' => true, 'needs_queue' => false, 'error' => '', 'trash_path' => $trashDest, 'root_cmd' => ''];
+}
+
+// ── Action queue ───────────────────────────────────────────────────────────────
+
+function integrity_queue_action(
+    PDO $pdo,
+    int $resultId,
+    string $action,
+    string $sourcePath,
+    string $targetPath,
+    string $relativePath,
+    string $requestedBy = ''
+): int {
+    try {
+        $stmt = $pdo->prepare(
+            'INSERT INTO scanner_integrity_actions
+                (result_id, action, status, source_path, target_path, relative_path, requested_by)
+             VALUES (:rid, :act, \'pending\', :src, :tgt, :rel, :by)'
+        );
+        $stmt->execute([
+            ':rid' => $resultId,
+            ':act' => $action,
+            ':src' => $sourcePath,
+            ':tgt' => $targetPath,
+            ':rel' => $relativePath,
+            ':by'  => $requestedBy,
+        ]);
+        return (int) $pdo->lastInsertId();
+    } catch (PDOException $e) {
+        return 0;
+    }
+}
+
+function integrity_load_action(PDO $pdo, int $actionId): ?array {
+    try {
+        $stmt = $pdo->prepare('SELECT * FROM scanner_integrity_actions WHERE id = :id LIMIT 1');
+        $stmt->execute([':id' => $actionId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    } catch (PDOException $e) {
+        return null;
+    }
+}
+
+function integrity_load_pending_actions(PDO $pdo): array {
+    try {
+        $stmt = $pdo->query(
+            'SELECT * FROM scanner_integrity_actions WHERE status = \'pending\' ORDER BY created_at ASC'
+        );
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        return [];
+    }
+}
+
+function integrity_cancel_action(PDO $pdo, int $actionId): bool {
+    try {
+        $stmt = $pdo->prepare(
+            'UPDATE scanner_integrity_actions SET status = \'cancelled\' WHERE id = :id AND status = \'pending\' LIMIT 1'
+        );
+        $stmt->execute([':id' => $actionId]);
+        return $stmt->rowCount() > 0;
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+/**
+ * Returns the queued action for a result (pending or running), or null.
+ */
+function integrity_result_pending_action(PDO $pdo, int $resultId): ?array {
+    try {
+        $stmt = $pdo->prepare(
+            'SELECT * FROM scanner_integrity_actions
+              WHERE result_id = :rid AND status IN (\'pending\', \'running\')
+              ORDER BY created_at DESC LIMIT 1'
+        );
+        $stmt->execute([':rid' => $resultId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    } catch (PDOException $e) {
+        return null;
+    }
 }
 
 /**

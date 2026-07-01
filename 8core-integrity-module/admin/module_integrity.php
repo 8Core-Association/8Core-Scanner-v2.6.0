@@ -535,21 +535,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($tr['ok']) {
                     integrity_update_result_status($pdo, $runId, $resultId, 'trashed', $tr['trash_path']);
                     _int_flash_set('ok', 'Moved to Integrity Trash: ' . $row['relative_path']);
+                } elseif ($tr['needs_queue']) {
+                    $qid = integrity_queue_action(
+                        $pdo, $resultId, 'move_to_trash',
+                        $row['full_path'], $tr['trash_path'], $row['relative_path'],
+                        $_SESSION['user'] ?? ''
+                    );
+                    if ($qid > 0) {
+                        integrity_update_result_status($pdo, $runId, $resultId, 'pending_action', 'action_id:' . $qid);
+                        _int_flash_set('ok', 'Action queued for root worker (action #' . $qid . '): ' . $row['relative_path']);
+                    } else {
+                        _int_flash_set('err', 'Storage not ready and queue insert failed: ' . $tr['error']);
+                    }
                 } else {
-                    integrity_update_result_status($pdo, $runId, $resultId, 'failed', $tr['error']);
-                    $_SESSION['8int_fail_detail'][$resultId] = [
-                        'error'    => $tr['error'],
-                        'root_cmd' => $tr['root_cmd'] ?? '',
-                    ];
+                    $_SESSION['8int_fail_detail'][$resultId] = ['error' => $tr['error'], 'root_cmd' => ''];
                     _int_flash_set('err', 'Trash failed: ' . $tr['error']);
                 }
             } elseif ($action === 'replace') {
                 if ($row['type'] === 'MODIFIED_FILE') {
                     // Trash the modified dest file first, then copy clean from origin
                     $tr = integrity_do_trash_path($row['full_path'], $row['destination_path'], $row['relative_path']);
-                    if (!$tr['ok']) {
+                    if (!$tr['ok'] && !$tr['needs_queue']) {
                         integrity_update_result_status($pdo, $runId, $resultId, 'failed', $tr['error']);
                         _int_flash_set('err', 'Trash (pre-replace) failed: ' . $tr['error']);
+                        header('Location: ' . _int_build_check_url($runId, $filters));
+                        exit;
+                    }
+                    if (!$tr['ok'] && $tr['needs_queue']) {
+                        $qid = integrity_queue_action(
+                            $pdo, $resultId, 'replace_from_origin',
+                            $row['full_path'], $tr['trash_path'], $row['relative_path'],
+                            $_SESSION['user'] ?? ''
+                        );
+                        if ($qid > 0) {
+                            integrity_update_result_status($pdo, $runId, $resultId, 'pending_action', 'action_id:' . $qid);
+                            _int_flash_set('ok', 'Replace queued for root worker (action #' . $qid . '): ' . $row['relative_path']);
+                        } else {
+                            _int_flash_set('err', 'Storage not ready and queue insert failed: ' . $tr['error']);
+                        }
                         header('Location: ' . _int_build_check_url($runId, $filters));
                         exit;
                     }
@@ -566,14 +589,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif ($action === 'mark_reviewed') {
                 integrity_update_result_status($pdo, $runId, $resultId, 'reviewed');
                 _int_flash_set('ok', 'Marked as reviewed: ' . $row['relative_path']);
+            } elseif ($action === 'cancel_pending_action') {
+                // Cancel a queued action and reset result status to 'new'
+                if ($row['status'] === 'pending_action') {
+                    // Extract action_id from note field
+                    $actionId = 0;
+                    if (preg_match('/^action_id:(\d+)$/', $row['note'] ?? '', $m)) {
+                        $actionId = (int) $m[1];
+                    }
+                    $cancelled = $actionId > 0 && integrity_cancel_action($pdo, $actionId);
+                    integrity_update_result_status($pdo, $runId, $resultId, 'new', '');
+                    _int_flash_set('ok', 'Pending action cancelled. Result reset to new.' . ($cancelled ? '' : ' (action already executed)'));
+                } else {
+                    _int_flash_set('err', 'No pending action to cancel.');
+                }
             } elseif ($action === 'reset_status') {
-                // Reset failed/reviewed rows back to 'new' for retry
-                if (in_array($row['status'], ['failed', 'reviewed'], true)) {
+                // Reset failed/reviewed/pending_action rows back to 'new' for retry
+                if (in_array($row['status'], ['failed', 'reviewed', 'pending_action'], true)) {
                     integrity_update_result_status($pdo, $runId, $resultId, 'new', '');
                     unset($_SESSION['8int_fail_detail'][$resultId]);
                     _int_flash_set('ok', 'Reset to new: ' . $row['relative_path']);
                 } else {
-                    _int_flash_set('err', 'Only failed or reviewed rows can be reset.');
+                    _int_flash_set('err', 'Only failed, reviewed, or pending_action rows can be reset.');
                 }
             }
         }
@@ -688,6 +725,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($tr['ok']) {
                         integrity_update_result_status($pdo, $runId, (int) $row['id'], 'trashed', $tr['trash_path']);
                         $ok++;
+                    } elseif ($tr['needs_queue']) {
+                        $qid = integrity_queue_action($pdo, (int)$row['id'], 'move_to_trash',
+                            $row['full_path'], $tr['trash_path'], $row['relative_path'], $_SESSION['user'] ?? '');
+                        if ($qid > 0) {
+                            integrity_update_result_status($pdo, $runId, (int)$row['id'], 'pending_action', 'action_id:' . $qid);
+                            $ok++;
+                        } else {
+                            $fail++;
+                        }
                     } else {
                         integrity_update_result_status($pdo, $runId, (int) $row['id'], 'failed', $tr['error']);
                         $fail++;
@@ -703,8 +749,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $fail++;
                     }
                 } elseif ($bulkAction === 'replace_modified' && $row['type'] === 'MODIFIED_FILE') {
-                    // Trash existing modified file first, then replace from origin
                     $tr = integrity_do_trash_path($row['full_path'], $row['destination_path'], $row['relative_path']);
+                    if (!$tr['ok'] && $tr['needs_queue']) {
+                        $qid = integrity_queue_action($pdo, (int)$row['id'], 'replace_from_origin',
+                            $row['full_path'], $tr['trash_path'], $row['relative_path'], $_SESSION['user'] ?? '');
+                        if ($qid > 0) {
+                            integrity_update_result_status($pdo, $runId, (int)$row['id'], 'pending_action', 'action_id:' . $qid);
+                            $ok++;
+                        } else {
+                            $fail++;
+                        }
+                        continue;
+                    }
                     if (!$tr['ok']) {
                         integrity_update_result_status($pdo, $runId, (int) $row['id'], 'failed', $tr['error']);
                         $fail++;
@@ -897,10 +953,13 @@ $_intRepoRoot    = integrity_repo_root();
 $_intGroups      = integrity_default_groups();
 $_intExtraApps   = integrity_extra_apps();
 $_intAllImported = integrity_all_imported();
-$_intWebUser     = function_exists('posix_getpwuid')
-    ? (posix_getpwuid(posix_geteuid())['name'] ?? 'www-data')
-    : 'www-data';
+$_intWebUser = integrity_php_user();
 $_intRootCmd = str_replace('{webuser}', $_intWebUser, $_intRootCmd ?? '');
+
+// Storage status
+$_intStorageStatus  = integrity_storage_status();
+$_intStorageReady   = integrity_storage_ready();
+$_intStorageSetupCmd = integrity_storage_setup_cmd();
 
 // All existing root-level dirs for dropdowns
 $_intAllAppKeys = [];
@@ -1279,7 +1338,8 @@ require __DIR__ . '/../../../includes/version.php';
 .int-hash-none   { color:#94a3b8; }
 
 /* ── Status badges extended ── */
-.int-status-badge.reviewed { background:#eff6ff; color:#1d4ed8; }
+.int-status-badge.reviewed       { background:#eff6ff; color:#1d4ed8; }
+.int-status-badge.pending_action { background:#fef9c3; color:#713f12; border:1px solid #fde047; }
 
 /* ── MODIFIED_FILE row highlight ── */
 .int-results-table tr.type-modified td { background:rgba(220,38,38,.06); }
@@ -1437,6 +1497,82 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
     <div id="int-tab-repo"<?= $_intActiveTab !== 'repo' ? ' style="display:none"' : '' ?>>
 
     <!-- ══════════════════════════════════════════════════════ -->
+    <!-- ── Section: Module Storage Status ── -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <div class="int-section">
+      <div class="int-section-header">
+        <h3>Module Storage Status</h3>
+        <?php if ($_intStorageReady): ?>
+        <span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#16a34a;font-weight:600;">
+          <span style="width:8px;height:8px;border-radius:50%;background:#16a34a;display:inline-block;"></span>
+          Storage ready
+        </span>
+        <?php else: ?>
+        <span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#dc2626;font-weight:600;">
+          <span style="width:8px;height:8px;border-radius:50%;background:#dc2626;display:inline-block;"></span>
+          Setup required
+        </span>
+        <?php endif; ?>
+      </div>
+      <hr class="int-divider">
+      <div class="int-body">
+        <p style="margin:0 0 12px;font-size:12px;color:var(--text-muted);">
+          These directories must exist and be writable by the PHP process user
+          (<code><?= h($_intWebUser) ?></code>) before trash and queue actions work.
+        </p>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px;">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border);">
+              <th style="text-align:left;padding:5px 8px;color:var(--text-muted);font-weight:600;">Directory</th>
+              <th style="text-align:center;padding:5px 8px;color:var(--text-muted);font-weight:600;">Exists</th>
+              <th style="text-align:center;padding:5px 8px;color:var(--text-muted);font-weight:600;">Writable</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach ($_intStorageStatus as $__sd): ?>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:5px 8px;font-family:monospace;"><?= h($__sd['path']) ?></td>
+              <td style="text-align:center;padding:5px 8px;">
+                <?php if ($__sd['exists']): ?>
+                <span style="color:#16a34a;font-weight:700;">&#10003;</span>
+                <?php else: ?>
+                <span style="color:#dc2626;font-weight:700;">&#10007;</span>
+                <?php endif; ?>
+              </td>
+              <td style="text-align:center;padding:5px 8px;">
+                <?php if ($__sd['writable']): ?>
+                <span style="color:#16a34a;font-weight:700;">&#10003;</span>
+                <?php elseif ($__sd['exists']): ?>
+                <span style="color:#f59e0b;font-weight:700;" title="Directory exists but is not writable by <?= h($_intWebUser) ?>">&#9888;</span>
+                <?php else: ?>
+                <span style="color:#94a3b8;">—</span>
+                <?php endif; ?>
+              </td>
+            </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+
+        <?php if (!$_intStorageReady): ?>
+        <div style="background:#fefce8;border:1px solid #fde047;border-radius:7px;padding:12px 14px;margin-bottom:4px;">
+          <div style="font-size:11px;font-weight:700;color:#713f12;margin-bottom:8px;text-transform:uppercase;letter-spacing:.04em;">
+            One-time setup — run as root or via sudo:
+          </div>
+          <pre style="margin:0;font-size:11px;line-height:1.7;color:#1e293b;background:#fff;border:1px solid #e2e8f0;border-radius:5px;padding:10px 12px;overflow-x:auto;"><?= h($_intStorageSetupCmd) ?></pre>
+          <div style="margin-top:8px;font-size:11px;color:#92400e;">
+            After running the command, refresh this page to verify the status.
+          </div>
+        </div>
+        <?php else: ?>
+        <p style="margin:0;font-size:12px;color:var(--text-muted);">
+          Trash and queue operations will work without manual server intervention.
+          Actions that cannot be executed by the PHP user will be queued and processed by the root worker.
+        </p>
+        <?php endif; ?>
+      </div>
+    </div>
+
+<!-- ══════════════════════════════════════════════════════ -->
     <!-- ── Section: Import Repository ZIP ── -->
     <!-- ══════════════════════════════════════════════════════ -->
     <div class="int-section">
@@ -2280,6 +2416,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                 <option value="trashed"           <?= ($_intRunFilters['status'] ?? '') === 'trashed'           ? 'selected' : '' ?>>Trashed</option>
                 <option value="replaced"          <?= ($_intRunFilters['status'] ?? '') === 'replaced'          ? 'selected' : '' ?>>Replaced</option>
                 <option value="failed"            <?= ($_intRunFilters['status'] ?? '') === 'failed'            ? 'selected' : '' ?>>Failed</option>
+                <option value="pending_action"   <?= ($_intRunFilters['status'] ?? '') === 'pending_action'   ? 'selected' : '' ?>>Pending action</option>
               </select>
             </div>
             <div>
@@ -2362,6 +2499,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                   $isModified  = $r['type'] === 'MODIFIED_FILE';
                   $isFailed    = $r['status'] === 'failed';
                   $isReviewed  = $r['status'] === 'reviewed';
+                  $isPending   = $r['status'] === 'pending_action';
                   $__trClass   = 'sev-' . h($r['severity']) . ($isActioned ? ' is-actioned' : '') . ($isModified ? ' type-modified' : '');
                   // Failure detail: from session (fresh) or from DB note
                   $__failDetail = $_intFailDetails[(int)$r['id']] ?? null;
@@ -2408,6 +2546,14 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                     <span class="int-status-badge <?= h($r['status']) ?>"><?= h(str_replace('_', ' ', $r['status'])) ?></span>
                     <?php if ($r['note'] && $r['status'] === 'trashed'): ?>
                     <div style="font-size:10px;color:var(--text-muted);margin-top:2px;word-break:break-all;"><?= h($r['note']) ?></div>
+                    <?php endif; ?>
+                    <?php if ($isPending): ?>
+                    <div style="font-size:10px;color:#92400e;margin-top:3px;">
+                      Queued for root worker
+                      <?php if (preg_match('/^action_id:(\d+)$/', $r['note'] ?? '', $m)): ?>
+                      &mdash; action #<?= (int)$m[1] ?>
+                      <?php endif; ?>
+                    </div>
                     <?php endif; ?>
                     <?php if ($isFailed && $__failError): ?>
                     <div class="int-fail-detail">
@@ -2565,6 +2711,25 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                         <button type="submit" class="int-btn-act" style="font-size:10px;padding:2px 7px;"
                                 title="Reset status back to new.">
                           Reset
+                        </button>
+                      </form>
+                    </div>
+                    <?php elseif ($isPending): ?>
+                    <!-- Pending action: Cancel or Reset -->
+                    <div class="int-row-actions">
+                      <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
+                        <input type="hidden" name="action"        value="action_result">
+                        <input type="hidden" name="run_id"        value="<?= (int)$_intRunId ?>">
+                        <input type="hidden" name="result_id"     value="<?= (int)$r['id'] ?>">
+                        <input type="hidden" name="result_action" value="cancel_pending_action">
+                        <?php foreach (_int_filters_to_get($_intRunFilters) as $fk => $fv): ?>
+                        <input type="hidden" name="<?= h($fk) ?>" value="<?= h($fv) ?>">
+                        <?php endforeach; ?>
+                        <?= csrf_field() ?>
+                        <button type="submit" class="int-btn-act" style="font-size:10px;padding:2px 7px;color:#92400e;border-color:#fde047;"
+                                title="Cancel queued action and reset to new."
+                                onclick="return confirm('Cancel queued action for this result?')">
+                          Cancel action
                         </button>
                       </form>
                     </div>
