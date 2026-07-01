@@ -6,6 +6,37 @@ Verzioniranje slijedi [Semantic Versioning](https://semver.org/lang/hr/).
 
 ---
 
+## [2.6.8] — 2026-07-01
+
+### Added
+
+- **`admin/module.php`** — admin module router:
+  - URL format: `admin/module.php?module=<key>&page=<page>`
+  - Validacija: `module_key` regex `[a-z0-9-]`, `page` regex `[a-z0-9_-]`
+  - Provjerava da je modul installed i active; graceful HTML poruke ako nije
+  - Path traversal guard: resolved path mora biti unutar `modules/`
+  - Svi auth, `$pdo`, helperi i sidebar dostupni module stranici
+
+- **`admin/modules.php`** — Open link u "Instalirani moduli" tablici:
+  - Prikazuje se samo ako je modul active i manifest ima `admin_menu[0].url`
+  - Vodi na `module.php?module=<key>&page=<page>`
+
+- **`admin/sidebar.php`** — module menu URL ispravljen:
+  - `href` sada koristi `url` iz manifesta direktno (relativan na `admin/`)
+  - Sidebar prikazuje "Integrity" link kad je modul active
+
+- **`modules/8core-integrity/`** — instalirani modul:
+  - `module.php` — manifest s ispravnim `admin_menu.url`
+  - `includes/integrity.php` — `integrity_repo_root()`, `integrity_default_tree()`, `integrity_ensure_repo_structure()`
+  - `admin/module_integrity.php` — admin UI:
+    - Repository Manager: prikaz repo root, default tree, "Create repository structure" gumb
+    - Greška kreiranja: prikazuje root bash komandu (`mkdir -p ... && chown ...`)
+    - Integrity Check: origin/destination forma s placeholder porukom
+
+- **`8core-integrity-module/module.php`** — development manifest azuriran s ispravnim `admin_menu.url`
+
+---
+
 ## [2.6.7] — 2026-07-01
 
 ### Added

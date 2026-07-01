@@ -2,8 +2,8 @@
 /**
  * 8Core Integrity — module manifest
  *
- * Ovaj fajl se učitava via `include` u Module Manageru.
- * Mora vraćati PHP array — bez echo, bez side effecta.
+ * This file is loaded via `include` by the Module Manager and sidebar.
+ * Must return a PHP array — no echo, no side effects.
  */
 return [
     'module_key'  => '8core-integrity',

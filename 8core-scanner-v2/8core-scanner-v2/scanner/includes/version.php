@@ -4,5 +4,5 @@
  * Ovu konstantu koristiti svugdje gdje se prikazuje verzija u UI-u.
  */
 if (!defined('SCANNER_VERSION')) {
-    define('SCANNER_VERSION', '2.6.7');
+    define('SCANNER_VERSION', '2.6.8');
 }

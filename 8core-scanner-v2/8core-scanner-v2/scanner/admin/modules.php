@@ -221,6 +221,18 @@ foreach ($discoveredModules as $key => $info) {
           </thead>
           <tbody>
             <?php foreach ($installedModules as $mod): ?>
+            <?php
+            $_modOpenUrl = null;
+            if ((int)$mod['active']) {
+                $_modManifestPath = __DIR__ . '/../modules/' . $mod['module_key'] . '/module.php';
+                if (file_exists($_modManifestPath)) {
+                    $_modManifest = @include $_modManifestPath;
+                    if (is_array($_modManifest) && !empty($_modManifest['admin_menu'][0]['url'])) {
+                        $_modOpenUrl = $_modManifest['admin_menu'][0]['url'];
+                    }
+                }
+            }
+            ?>
             <tr>
               <td><b><?= h($mod['name']) ?></b></td>
               <td><code><?= h($mod['module_key']) ?></code></td>
@@ -233,7 +245,10 @@ foreach ($discoveredModules as $key => $info) {
                   <span class="badge" style="background:var(--bg-alt,var(--bg));color:var(--text-muted);">Disabled</span>
                 <?php endif; ?>
               </td>
-              <td>
+              <td style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                <?php if ($_modOpenUrl): ?>
+                  <a href="<?= htmlspecialchars($_modOpenUrl, ENT_QUOTES, 'UTF-8') ?>" class="btn btn-ghost" style="font-size:12px;">Open</a>
+                <?php endif; ?>
                 <form method="post" action="modules_action.php" style="display:inline;">
                   <?= csrf_field() ?>
                   <input type="hidden" name="module_key" value="<?= h($mod['module_key']) ?>">

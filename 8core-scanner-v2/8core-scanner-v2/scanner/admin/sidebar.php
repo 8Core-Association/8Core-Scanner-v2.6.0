@@ -28,8 +28,8 @@ if (isset($pdo) && function_exists('scanner_modules_table_exists') && scanner_mo
             if (empty($item['label']) || empty($item['url'])) continue;
             $_sbModuleMenuItems[] = [
                 'label' => $item['label'],
-                // url is relative to scanner/ root
-                'href'  => '../' . ltrim($item['url'], '/'),
+                // url is relative to admin/ — use as-is
+                'href'  => ltrim($item['url'], '/'),
             ];
         }
     }
