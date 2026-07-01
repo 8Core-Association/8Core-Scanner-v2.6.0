@@ -4,13 +4,11 @@
  * (c) 2026 Tomislav Galić <tomislav@8core.hr>
  * Sva prava pridržana.
  *
- * Standalone bootstrap — mora se installati u scanner/modules/8core-integrity/
- * i koristiti kroz admin/module.php router.
+ * Standalone bootstrap — instaliraj u scanner/modules/8core-integrity/
+ * i koristi kroz admin/module.php router.
  * Ovaj fajl je development paket — ne pokrece se direktno.
  */
 
-// When running standalone (dev/test), bootstrap from installed location.
-// When included via router, auth/helpers/pdo are already available.
 if (!function_exists('require_admin')) {
     $scannerRoot = realpath(__DIR__ . '/../../../');
     if ($scannerRoot && file_exists($scannerRoot . '/includes/auth.php')) {
@@ -31,6 +29,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_verify();
     $postAction = isset($_POST['action']) ? trim($_POST['action']) : '';
 
+    // ── Create default structure ───────────────────────────────────────────────
     if ($postAction === 'create_repo_structure') {
         $results   = integrity_ensure_repo_structure();
         $anyFailed = false;
@@ -49,22 +48,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    if ($postAction === 'add_custom_dir') {
-        $name = strtolower(trim($_POST['folder_name'] ?? ''));
-        if (!preg_match('/^[a-z0-9_-]+$/', $name)) {
-            $_intMessages[] = ['type' => 'err', 'text' => 'FAIL  Invalid folder name "' . h($name) . '". Use only: a-z 0-9 _ -'];
+    // ── Add root application folder ────────────────────────────────────────────
+    if ($postAction === 'add_app') {
+        $name = strtolower(trim($_POST['app_name'] ?? ''));
+        if (!integrity_valid_name($name)) {
+            $_intMessages[] = ['type' => 'err', 'text' => 'FAIL  Invalid application name "' . h($name) . '". Use only: a-z 0-9 _ -'];
         } else {
-            $r = integrity_create_custom_dir($name);
+            $r = integrity_create_app($name);
             if ($r['exists']) {
-                $_intMessages[] = ['type' => 'warn', 'text' => 'Custom repository "' . h($name) . '" already exists.'];
+                $_intMessages[] = ['type' => 'warn', 'text' => 'Application folder "' . h($name) . '" already exists.'];
             } elseif ($r['ok']) {
                 $_intMessages[] = ['type' => 'ok', 'text' => 'OK  ' . $r['path'] . '  [created]'];
             } else {
                 $_intMessages[] = ['type' => 'err', 'text' => 'FAIL  ' . $r['path'] . '  [' . $r['note'] . ']'];
                 $_intShowRootCmd = true;
                 $root = integrity_repo_root();
-                $_intRootCmd = "mkdir -p {$root}/custom/" . $name
-                    . "\nchown -R {webuser}:{webuser} {$root}/custom/" . $name;
+                $_intRootCmd = "mkdir -p {$root}/{$name}\nchown -R {webuser}:{webuser} {$root}/{$name}";
+            }
+        }
+    }
+
+    // ── Add version sub-folder inside an application ───────────────────────────
+    if ($postAction === 'add_version') {
+        $app     = strtolower(trim($_POST['app_key']     ?? ''));
+        $version = strtolower(trim($_POST['version_name'] ?? ''));
+        if (!integrity_valid_name($app) || !integrity_valid_name($version)) {
+            $_intMessages[] = ['type' => 'err', 'text' => 'FAIL  Invalid application or version name. Use only: a-z 0-9 _ -'];
+        } else {
+            $r = integrity_create_version($app, $version);
+            if ($r['exists']) {
+                $_intMessages[] = ['type' => 'warn', 'text' => 'Version "' . h($version) . '" already exists in "' . h($app) . '".'];
+            } elseif ($r['ok']) {
+                $_intMessages[] = ['type' => 'ok', 'text' => 'OK  ' . $r['path'] . '  [created]'];
+            } else {
+                $_intMessages[] = ['type' => 'err', 'text' => 'FAIL  ' . $r['path'] . '  [' . $r['note'] . ']'];
+                $_intShowRootCmd = true;
+                $root = integrity_repo_root();
+                $_intRootCmd = "mkdir -p {$root}/{$app}/{$version}\nchown -R {webuser}:{webuser} {$root}/{$app}/{$version}";
             }
         }
     }
@@ -72,9 +92,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $_intRepoRoot   = integrity_repo_root();
 $_intGroups     = integrity_default_groups();
-$_intCustomDirs = integrity_custom_dirs();
+$_intExtraApps  = integrity_extra_apps();
 $_intWebUser    = function_exists('posix_getpwuid') ? (posix_getpwuid(posix_geteuid())['name'] ?? 'www-data') : 'www-data';
 $_intRootCmd    = str_replace('{webuser}', $_intWebUser, $_intRootCmd ?? '');
+
+// Build all app keys for the "add version" dropdown (existing dirs on disk)
+$_intAllAppKeys = [];
+foreach ($_intGroups as $g) {
+    if (is_dir($_intRepoRoot . '/' . $g['key'])) {
+        $_intAllAppKeys[] = $g['key'];
+    }
+}
+foreach ($_intExtraApps as $ea) {
+    $_intAllAppKeys[] = $ea;
+}
+
+require __DIR__ . '/../../../includes/version.php';
 ?>
 <!doctype html>
 <html lang="hr">
@@ -89,39 +122,60 @@ $_intRootCmd    = str_replace('{webuser}', $_intWebUser, $_intRootCmd ?? '');
 .int-section-header h3 { margin:0; font-size:13px; font-weight:700; color:var(--text); }
 .int-divider { border:none; border-top:1px solid var(--border); margin:12px 0 0; }
 .int-body { padding:16px 20px; }
+
+/* repo root badge */
 .int-repo-path { font-family:var(--font-mono,monospace); font-size:13px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:8px 12px; color:var(--text); display:inline-block; margin-bottom:16px; word-break:break-all; }
-.int-tree-wrap { display:flex; flex-wrap:wrap; gap:14px; margin-bottom:18px; }
-.int-tree-group { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:12px 14px; min-width:140px; }
-.int-tree-group-label { font-size:11px; font-weight:700; color:var(--text); text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; }
+
+/* tree cards grid */
+.int-tree-wrap { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:20px; }
+.int-tree-group { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:12px 14px; min-width:130px; }
+.int-tree-group.is-extra { border-style:dashed; }
+.int-tree-group-label { font-size:11px; font-weight:700; color:var(--text); text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; display:flex; align-items:center; gap:5px; }
+.int-tree-group-label .dir-tick { font-size:10px; font-weight:400; text-transform:none; letter-spacing:0; }
 .int-tree-group ul { margin:0; padding:0 0 0 2px; list-style:none; }
-.int-tree-group li { font-family:var(--font-mono,monospace); font-size:12px; color:var(--text-muted); padding:2px 0; display:flex; align-items:center; gap:5px; }
-.int-tree-group li::before { content:''; display:inline-block; width:12px; height:1px; background:var(--border); flex-shrink:0; }
-.int-tree-group-empty { font-size:12px; color:#94a3b8; font-style:italic; padding:2px 0; }
+.int-tree-group li { font-family:var(--font-mono,monospace); font-size:12px; padding:2px 0; display:flex; align-items:center; gap:5px; }
+.int-tree-group li::before { content:''; display:inline-block; width:10px; height:1px; background:var(--border); flex-shrink:0; }
+.int-tree-group-empty { font-size:11px; color:#94a3b8; font-style:italic; padding:2px 0; }
 .dir-exists { color:#16a34a; }
 .dir-missing { color:#94a3b8; }
+.tick-ok  { color:#16a34a; }
+.tick-no  { color:#cbd5e1; }
+
+/* messages */
 .msg-list { list-style:none; margin:0 0 12px; padding:0; }
 .msg-list li { font-family:var(--font-mono,monospace); font-size:12px; padding:3px 0; border-bottom:1px solid var(--border); }
 .msg-list li:last-child { border-bottom:none; }
-.msg-ok  { color:#16a34a; }
+.msg-ok   { color:#16a34a; }
 .msg-warn { color:#d97706; font-style:italic; }
-.msg-err { color:#dc2626; }
+.msg-err  { color:#dc2626; }
+
+/* root cmd box */
 .int-root-cmd { background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:14px 16px; margin-top:12px; }
 .int-root-cmd p { margin:0 0 8px; font-size:12px; color:#92400e; font-weight:600; }
 .int-root-cmd pre { margin:0; font-family:var(--font-mono,monospace); font-size:12px; color:#166534; background:#dcfce7; border-radius:6px; padding:10px 12px; white-space:pre-wrap; word-break:break-all; line-height:1.6; }
-.int-add-custom { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-top:4px; }
-.int-add-custom-field { display:flex; flex-direction:column; gap:4px; }
-.int-add-custom-field label { font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; }
-.int-add-custom-field input[type=text] { padding:8px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--font-mono,monospace); font-size:13px; outline:none; width:220px; transition:border-color .13s; }
-.int-add-custom-field input[type=text]::placeholder { color:#94a3b8; }
-.int-add-custom-field input[type=text]:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.18); }
-.int-hint { font-size:11px; color:#94a3b8; margin-top:5px; }
+
+/* inline forms */
+.int-inline-form { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; }
+.int-form-field { display:flex; flex-direction:column; gap:4px; }
+.int-form-field label { font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; }
+.int-form-field input[type=text],
+.int-form-field select { padding:8px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--font-mono,monospace); font-size:13px; outline:none; transition:border-color .13s; }
+.int-form-field input[type=text] { width:200px; }
+.int-form-field select { min-width:160px; }
+.int-form-field input[type=text]::placeholder { color:#94a3b8; }
+.int-form-field input[type=text]:focus,
+.int-form-field select:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.18); }
+.int-hint { font-size:11px; color:#94a3b8; margin-top:6px; }
+.int-section-divider { border:none; border-top:1px solid var(--border); margin:20px 0 18px; }
+
+/* integrity check */
 .int-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 20px; margin-bottom:14px; }
 .int-field label { display:block; font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px; }
 .int-field input[type=text] { width:100%; padding:8px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--font-mono,monospace); font-size:13px; outline:none; box-sizing:border-box; transition:border-color .13s; }
 .int-field input[type=text]::placeholder { color:#94a3b8; }
 .int-field input[type=text]:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.18); }
 .int-placeholder { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:14px 16px; font-size:13px; color:var(--text-muted); margin-top:12px; }
-@media (max-width:640px) { .int-form-grid { grid-template-columns:1fr; } .int-tree-wrap { flex-direction:column; } }
+@media (max-width:700px) { .int-form-grid { grid-template-columns:1fr; } .int-tree-wrap { flex-direction:column; } .int-inline-form { flex-direction:column; align-items:flex-start; } .int-form-field input[type=text] { width:100%; } }
 </style>
 </head>
 <body>
@@ -154,7 +208,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) {
       </ul>
       <?php if ($_intShowRootCmd && $_intRootCmd): ?>
       <div class="int-root-cmd">
-        <p>PHP nema dozvolu za kreiranje direktorija. Pokreni kao root:</p>
+        <p>PHP nema dozvolu. Pokreni kao root:</p>
         <pre><?= h($_intRootCmd) ?></pre>
       </div>
       <?php endif; ?>
@@ -172,80 +226,138 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) {
         <div style="margin-bottom:6px;font-size:12px;color:var(--text-muted);">Repo root</div>
         <div class="int-repo-path"><?= h($_intRepoRoot) ?></div>
 
-        <div style="margin-bottom:10px;font-size:12px;color:var(--text-muted);">Repository structure</div>
+        <div style="margin-bottom:10px;font-size:12px;color:var(--text-muted);">Repository structure
+          <span style="color:#94a3b8;font-size:11px;margin-left:6px;">&#10003; = exists on disk</span>
+        </div>
+
         <div class="int-tree-wrap">
+          <!-- Default app groups -->
           <?php foreach ($_intGroups as $group):
-            $isCustom = ($group['key'] === 'custom');
-            $groupDir = $_intRepoRoot . '/' . $group['key'];
+            $groupDir    = $_intRepoRoot . '/' . $group['key'];
             $groupExists = is_dir($groupDir);
           ?>
           <div class="int-tree-group">
             <div class="int-tree-group-label">
               <?= h($group['label']) ?>
-              <span style="font-weight:400;color:<?= $groupExists ? '#16a34a' : '#94a3b8' ?>;font-size:10px;text-transform:none;letter-spacing:0;margin-left:4px;">
+              <span class="dir-tick <?= $groupExists ? 'tick-ok' : 'tick-no' ?>">
                 <?= $groupExists ? '&#10003;' : '&mdash;' ?>
               </span>
             </div>
-            <?php if (!$isCustom): ?>
-              <?php if (!empty($group['versions'])): ?>
+            <?php if (!empty($group['versions'])): ?>
+            <ul>
+              <?php foreach ($group['versions'] as $v):
+                $vExists = is_dir($groupDir . '/' . $v);
+              ?>
+                <li class="<?= $vExists ? 'dir-exists' : 'dir-missing' ?>"><?= h($v) ?></li>
+              <?php endforeach; ?>
+            </ul>
+            <?php else: ?>
+              <?php
+                $subDirs = integrity_app_versions($group['key']);
+                if (!empty($subDirs)):
+              ?>
               <ul>
-                <?php foreach ($group['versions'] as $v):
-                  $vExists = is_dir($groupDir . '/' . $v);
-                ?>
-                  <li class="<?= $vExists ? 'dir-exists' : 'dir-missing' ?>"><?= h($v) ?></li>
+                <?php foreach ($subDirs as $sd): ?>
+                  <li class="dir-exists"><?= h($sd) ?></li>
                 <?php endforeach; ?>
               </ul>
               <?php else: ?>
                 <div class="int-tree-group-empty">no versions</div>
               <?php endif; ?>
+            <?php endif; ?>
+          </div>
+          <?php endforeach; ?>
+
+          <!-- Extra (admin-added) app groups -->
+          <?php foreach ($_intExtraApps as $ea):
+            $subDirs = integrity_app_versions($ea);
+          ?>
+          <div class="int-tree-group is-extra">
+            <div class="int-tree-group-label">
+              <?= h($ea) ?>
+              <span class="dir-tick tick-ok">&#10003;</span>
+            </div>
+            <?php if (!empty($subDirs)): ?>
+            <ul>
+              <?php foreach ($subDirs as $sd): ?>
+                <li class="dir-exists"><?= h($sd) ?></li>
+              <?php endforeach; ?>
+            </ul>
             <?php else: ?>
-              <?php if (!empty($_intCustomDirs)): ?>
-              <ul>
-                <?php foreach ($_intCustomDirs as $cd): ?>
-                  <li class="dir-exists"><?= h($cd) ?></li>
-                <?php endforeach; ?>
-              </ul>
-              <?php else: ?>
-                <div class="int-tree-group-empty">no custom repos yet</div>
-              <?php endif; ?>
+              <div class="int-tree-group-empty">no versions</div>
             <?php endif; ?>
           </div>
           <?php endforeach; ?>
         </div>
 
+        <!-- Create default structure button -->
         <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
           <input type="hidden" name="action" value="create_repo_structure">
           <?= csrf_field() ?>
           <button type="submit" class="btn btn-primary">Create repository structure</button>
         </form>
-        <p style="margin:8px 0 0;font-size:12px;color:var(--text-muted);">
-          Kreira sve direktorije iznad. Postojeci se ne mijenjaju. Checkmark (&#10003;) = postoji na disku.
+        <p style="margin:7px 0 0;font-size:12px;color:var(--text-muted);">
+          Kreira default strukturu (Joomla, WordPress, WHMCS, PrestaShop, Custom). Postojeci direktoriji se ne mijenjaju.
         </p>
 
-        <hr style="border:none;border-top:1px solid var(--border);margin:20px 0 16px;">
+        <hr class="int-section-divider">
 
-        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:10px;">Add custom repository folder</div>
+        <!-- Add root application folder -->
+        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:10px;">Add application</div>
         <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
-          <input type="hidden" name="action" value="add_custom_dir">
+          <input type="hidden" name="action" value="add_app">
           <?= csrf_field() ?>
-          <div class="int-add-custom">
-            <div class="int-add-custom-field">
-              <label>Folder name</label>
-              <input type="text" name="folder_name"
-                     placeholder="phpbb"
-                     pattern="[a-z0-9_\-]+"
-                     title="Samo mala slova, brojevi, crtica, underscore"
-                     maxlength="64"
-                     value="<?= h(strtolower($_POST['folder_name'] ?? '')) ?>">
+          <div class="int-inline-form">
+            <div class="int-form-field">
+              <label>Application name</label>
+              <input type="text" name="app_name"
+                     placeholder="magento"
+                     pattern="[a-z0-9_\-]+" maxlength="64"
+                     value="<?= h(strtolower($_POST['app_name'] ?? '')) ?>">
             </div>
-            <button type="submit" class="btn btn-ghost" style="font-size:13px;">Add folder</button>
+            <button type="submit" class="btn btn-ghost" style="font-size:13px;">Add application</button>
           </div>
           <div class="int-hint">
-            Kreira: <?= h($_intRepoRoot) ?>/custom/<em>&lt;folder_name&gt;</em>
-            &nbsp;&middot;&nbsp;
-            Dopušteno: a–z, 0–9, crtica, underscore
+            Kreira: <?= h($_intRepoRoot) ?>/<em>&lt;name&gt;</em>
+            &nbsp;&middot;&nbsp; a–z, 0–9, crtica, underscore
           </div>
         </form>
+
+        <hr class="int-section-divider">
+
+        <!-- Add version inside an application -->
+        <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:10px;">Add version folder</div>
+        <?php if (empty($_intAllAppKeys)): ?>
+          <p style="font-size:12px;color:var(--text-muted);margin:0;">
+            Nema aplikacijskih foldera na disku. Prvo pokre&ntilde;i &ldquo;Create repository structure&rdquo; ili dodaj aplikaciju iznad.
+          </p>
+        <?php else: ?>
+        <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
+          <input type="hidden" name="action" value="add_version">
+          <?= csrf_field() ?>
+          <div class="int-inline-form">
+            <div class="int-form-field">
+              <label>Application</label>
+              <select name="app_key">
+                <?php foreach ($_intAllAppKeys as $ak): ?>
+                  <option value="<?= h($ak) ?>"><?= h($ak) ?></option>
+                <?php endforeach; ?>
+              </select>
+            </div>
+            <div class="int-form-field">
+              <label>Version / folder name</label>
+              <input type="text" name="version_name"
+                     placeholder="v2"
+                     pattern="[a-z0-9_\-]+" maxlength="64"
+                     value="<?= h(strtolower($_POST['version_name'] ?? '')) ?>">
+            </div>
+            <button type="submit" class="btn btn-ghost" style="font-size:13px;">Add version</button>
+          </div>
+          <div class="int-hint">
+            Kreira: <?= h($_intRepoRoot) ?>/<em>&lt;application&gt;</em>/<em>&lt;version&gt;</em>
+          </div>
+        </form>
+        <?php endif; ?>
 
       </div>
     </div>
