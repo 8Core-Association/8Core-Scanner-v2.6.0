@@ -329,6 +329,14 @@ foreach ($_intExtraApps as $ea) {
     $_intAllAppKeys[] = $ea;
 }
 
+// ── Tab routing ────────────────────────────────────────────────────────────────
+$_intTabBase    = 'module.php?module=8core-integrity&page=module_integrity';
+$_rawTab        = trim($_GET['tab'] ?? '');
+$_intActiveTab  = match($_rawTab) {
+    'repo', 'check' => $_rawTab,
+    default => !empty($_intAllImported) ? 'check' : 'repo',
+};
+
 require __DIR__ . '/../../../includes/version.php';
 ?>
 <!doctype html>
@@ -469,6 +477,12 @@ require __DIR__ . '/../../../includes/version.php';
 .int-modal-current-path { font-family:var(--font-mono,monospace); font-size:11px; color:var(--text-muted); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .int-modal-actions { display:flex; gap:8px; flex-shrink:0; }
 
+/* ── Tab bar ── */
+.int-tabs { display:flex; gap:0; border-bottom:2px solid var(--border); margin-bottom:22px; }
+.int-tab { padding:10px 20px; font-size:13px; font-weight:600; color:var(--text-muted); text-decoration:none; border-bottom:2px solid transparent; margin-bottom:-2px; transition:color .15s, border-color .15s; white-space:nowrap; }
+.int-tab:hover { color:var(--text); border-bottom-color:var(--border); }
+.int-tab.is-active { color:#2563eb; border-bottom-color:#2563eb; }
+
 @media (max-width:720px) {
   .int-form-grid { grid-template-columns:1fr; }
   .int-tree-wrap { flex-direction:column; }
@@ -490,7 +504,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   <div class="topbar">
     <div class="topbar-title">8Core Integrity</div>
     <div class="topbar-meta">
-      <span style="font-size:12px;color:var(--text-muted);">v0.3.0</span>
+      <span style="font-size:12px;color:var(--text-muted);">v0.4.0</span>
       &nbsp;&nbsp;<a href="../logout.php" style="color:var(--text-muted);font-size:12px;">Odjava</a>
     </div>
   </div>
@@ -559,14 +573,14 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
           </div>
           <div class="int-conflict-actions">
             <!-- Abort -->
-            <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
+            <form method="post" action="module.php?module=8core-integrity&page=module_integrity&tab=repo">
               <input type="hidden" name="action"    value="import_zip_abort">
               <input type="hidden" name="zip_token" value="<?= h($c['token']) ?>">
               <?= csrf_field() ?>
               <button type="submit" class="btn btn-ghost">Abort</button>
             </form>
             <!-- Replace -->
-            <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
+            <form method="post" action="module.php?module=8core-integrity&page=module_integrity&tab=repo">
               <input type="hidden" name="action"    value="import_zip_replace">
               <input type="hidden" name="zip_token" value="<?= h($c['token']) ?>">
               <?= csrf_field() ?>
@@ -581,6 +595,17 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
     </div>
     <?php endif; ?>
 
+    <!-- ── Tab bar ─────────────────────────────────────────────────────────── -->
+    <nav class="int-tabs">
+      <a href="<?= h($_intTabBase) ?>&tab=repo"
+         class="int-tab <?= $_intActiveTab === 'repo'  ? 'is-active' : '' ?>">Repository Manager</a>
+      <a href="<?= h($_intTabBase) ?>&tab=check"
+         class="int-tab <?= $_intActiveTab === 'check' ? 'is-active' : '' ?>">Integrity Check</a>
+    </nav>
+
+    <!-- ── Tab panel: Repository Manager ──────────────────────────────────── -->
+    <div id="int-tab-repo"<?= $_intActiveTab !== 'repo' ? ' style="display:none"' : '' ?>>
+
     <!-- ══════════════════════════════════════════════════════ -->
     <!-- ── Section: Import Repository ZIP ── -->
     <!-- ══════════════════════════════════════════════════════ -->
@@ -594,7 +619,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
           Upload a clean core package ZIP and extract it as the origin repository for a specific application, branch, and version.
         </p>
 
-        <form method="post" action="module.php?module=8core-integrity&page=module_integrity"
+        <form method="post" action="module.php?module=8core-integrity&page=module_integrity&tab=repo"
               enctype="multipart/form-data">
           <input type="hidden" name="action" value="import_zip">
           <?= csrf_field() ?>
@@ -742,7 +767,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
         </div>
 
         <!-- Create default structure -->
-        <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
+        <form method="post" action="module.php?module=8core-integrity&page=module_integrity&tab=repo">
           <input type="hidden" name="action" value="create_repo_structure">
           <?= csrf_field() ?>
           <button type="submit" class="btn btn-primary">Create repository structure</button>
@@ -755,7 +780,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
 
         <!-- Add application -->
         <div class="int-subsection-title">Add application</div>
-        <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
+        <form method="post" action="module.php?module=8core-integrity&page=module_integrity&tab=repo">
           <input type="hidden" name="action" value="add_app">
           <?= csrf_field() ?>
           <div class="int-inline-form">
@@ -777,7 +802,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
             No application folders on disk yet. Run &ldquo;Create repository structure&rdquo; or add an application above.
           </p>
         <?php else: ?>
-        <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
+        <form method="post" action="module.php?module=8core-integrity&page=module_integrity&tab=repo">
           <input type="hidden" name="action" value="add_version">
           <?= csrf_field() ?>
           <div class="int-inline-form">
@@ -802,6 +827,11 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
       </div>
     </div>
 
+    </div><!-- /#int-tab-repo -->
+
+    <!-- ── Tab panel: Integrity Check ────────────────────────────────────── -->
+    <div id="int-tab-check"<?= $_intActiveTab !== 'check' ? ' style="display:none"' : '' ?>>
+
     <!-- ══════════════════════════════════════════════════════ -->
     <!-- ── Section: Integrity Check ── -->
     <!-- ══════════════════════════════════════════════════════ -->
@@ -811,7 +841,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
       </div>
       <hr class="int-divider">
       <div class="int-body">
-        <form method="post" action="module.php?module=8core-integrity&page=module_integrity" id="int-check-form">
+        <form method="post" action="module.php?module=8core-integrity&page=module_integrity&tab=check" id="int-check-form">
           <input type="hidden" name="action" value="integrity_check">
           <?= csrf_field() ?>
           <div class="int-form-grid">
@@ -884,6 +914,8 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
         </div>
       </div>
     </div>
+
+    </div><!-- /#int-tab-check -->
 
   </div>
 </div>

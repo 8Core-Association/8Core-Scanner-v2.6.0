@@ -1,5 +1,22 @@
 # 8Core Integrity — Changelog
 
+## [0.4.0] — 2026-07-01
+
+### Added
+
+- `admin/module_integrity.php` — tab bar: **Repository Manager** (`?tab=repo`) | **Integrity Check** (`?tab=check`)
+- `admin/module_integrity.php` — `$_intActiveTab` computed server-side from `?tab=` param; default logic: `check` if imported repos exist, else `repo`
+- `admin/module_integrity.php` — URL param is source of truth; inactive tab panel rendered with `style="display:none"` (no JS-only tab state)
+- `admin/module_integrity.php` — all POST form `action=""` URLs include `&tab=repo` or `&tab=check` so POST–render cycle preserves active tab
+- `module.php` — version bumped to `0.4.0`
+
+### Changed
+
+- Import Repository ZIP section moved into `tab=repo` panel
+- Repository Manager section (tree, add app, add version) moved into `tab=repo` panel
+- Integrity Check section (origin, destination, browse, detector) moved into `tab=check` panel
+- Messages, import success, and ZIP conflict banners remain above tab bar (always visible)
+
 ## [0.3.0] — 2026-07-01
 
 ### Added
