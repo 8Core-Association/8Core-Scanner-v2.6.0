@@ -1269,6 +1269,17 @@ function integrity_load_results_by_ids(PDO $pdo, int $runId, array $ids): array 
     }
 }
 
+function integrity_load_result_by_id(PDO $pdo, int $resultId): ?array {
+    try {
+        $stmt = $pdo->prepare('SELECT * FROM scanner_integrity_results WHERE id = :id LIMIT 1');
+        $stmt->execute([':id' => $resultId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    } catch (PDOException $e) {
+        return null;
+    }
+}
+
 /**
  * Updates status (and optional note) for a single result row, scoped to a run.
  */
@@ -1833,4 +1844,194 @@ function integrity_hash_check(
     ];
 }
 
+// ── Log infrastructure ─────────────────────────────────────────────────────────
+
+function integrity_logs_root(): string {
+    return integrity_storage_base() . '/logs';
+}
+
+function integrity_run_log_path(int $runId): string {
+    return integrity_logs_root() . '/runs/run_' . $runId . '.log';
+}
+
+function integrity_hash_log_path(string $jobId): string {
+    return integrity_logs_root() . '/hash/hash_job_' . preg_replace('/[^a-z0-9_-]/i', '_', $jobId) . '.log';
+}
+
+function integrity_action_log_path(int $actionId): string {
+    return integrity_logs_root() . '/actions/action_' . $actionId . '.log';
+}
+
+/**
+ * Validates that a log path is inside the integrity logs root and has no traversal.
+ * Returns the realpath on success, or null on failure.
+ */
+function integrity_log_safe_path(string $path): ?string {
+    // Must not contain null bytes
+    if (str_contains($path, "\0")) return null;
+
+    // Resolve as much as possible; parent dirs may not exist yet
+    $logsRoot = integrity_logs_root();
+    // Normalize without realpath (file may not exist)
+    $normalised = $path;
+    if (str_contains($path, '..')) return null;
+    if (!str_starts_with($path, $logsRoot . '/')) return null;
+
+    // If file exists, use realpath for extra safety
+    if (file_exists($path)) {
+        $real = realpath($path);
+        if ($real === false) return null;
+        $realLogsRoot = realpath($logsRoot);
+        if ($realLogsRoot === false) return null;
+        if (!str_starts_with($real, $realLogsRoot . '/')) return null;
+        return $real;
+    }
+
+    return $path;
+}
+
+/**
+ * Appends a line to a log file, creating the directory if needed.
+ */
+function integrity_log_write(string $path, string $line): void {
+    $dir = dirname($path);
+    if (!is_dir($dir)) @mkdir($dir, 0755, true);
+    @file_put_contents($path, $line . "\n", FILE_APPEND | LOCK_EX);
+}
+
+/**
+ * Writes a complete run log file.
+ */
+function integrity_write_run_log(int $runId, array $data): void {
+    $path = integrity_run_log_path($runId);
+    $lines = [
+        '8Core Integrity — Run Log',
+        str_repeat('=', 60),
+        'Run ID    : ' . $runId,
+        'Started   : ' . ($data['started_at'] ?? date('Y-m-d H:i:s')),
+        'Finished  : ' . ($data['finished_at'] ?? date('Y-m-d H:i:s')),
+        'Mode      : ' . ($data['mode'] ?? 'structural'),
+        'Origin    : ' . ($data['origin'] ?? ''),
+        'Dest      : ' . ($data['dest'] ?? ''),
+        'Software  : ' . ($data['software'] ?? ''),
+        '',
+        'Exclusions (' . count($data['exclusions'] ?? []) . '):',
+    ];
+    foreach ($data['exclusions'] ?? [] as $excl) {
+        $lines[] = '  ' . $excl;
+    }
+    $lines[] = '';
+    $lines[] = 'Counts:';
+    foreach ($data['counts'] ?? [] as $k => $v) {
+        $lines[] = '  ' . str_pad($k, 18) . ': ' . $v;
+    }
+    $lines[] = '';
+    $lines[] = 'Summary:';
+    foreach ($data['summary'] ?? [] as $k => $v) {
+        $lines[] = '  ' . str_pad($k, 22) . ': ' . $v;
+    }
+    if (!empty($data['errors'])) {
+        $lines[] = '';
+        $lines[] = 'Errors:';
+        foreach ((array) $data['errors'] as $e) {
+            $lines[] = '  [ERROR] ' . $e;
+        }
+    }
+    $lines[] = '';
+    $lines[] = str_repeat('-', 60);
+
+    $dir = dirname($path);
+    if (!is_dir($dir)) @mkdir($dir, 0755, true);
+    @file_put_contents($path, implode("\n", $lines) . "\n");
+}
+
+/**
+ * Writes a hash job log file.
+ */
+function integrity_write_hash_log(string $jobId, array $data): void {
+    $path  = integrity_hash_log_path($jobId);
+    $lines = [
+        '8Core Integrity — Hash Job Log',
+        str_repeat('=', 60),
+        'Job ID    : ' . $jobId,
+        'Started   : ' . ($data['started_at'] ?? date('Y-m-d H:i:s')),
+        'Finished  : ' . ($data['finished_at'] ?? date('Y-m-d H:i:s')),
+        'App       : ' . ($data['app'] ?? ''),
+        'Branch    : ' . ($data['branch'] ?? ''),
+        'Version   : ' . ($data['version'] ?? ''),
+        'Repo path : ' . ($data['repo_path'] ?? ''),
+        'Files     : ' . ($data['files'] ?? 0),
+        'Errors    : ' . ($data['errors'] ?? 0),
+        'Status    : ' . ($data['status'] ?? 'unknown'),
+    ];
+    if (!empty($data['error_detail'])) {
+        $lines[] = 'Error     : ' . $data['error_detail'];
+    }
+    $lines[] = '';
+    $lines[] = str_repeat('-', 60);
+
+    $dir = dirname($path);
+    if (!is_dir($dir)) @mkdir($dir, 0755, true);
+    @file_put_contents($path, implode("\n", $lines) . "\n");
+}
+
+// ── File preview ───────────────────────────────────────────────────────────────
+
+const INTEGRITY_PREVIEW_MAX_BYTES = 204800; // 200 KB
+
+/**
+ * Returns a safe preview of a file for display in the UI.
+ * Result: ['ok' => bool, 'content' => string, 'truncated' => bool, 'binary' => bool, 'size' => int, 'error' => string]
+ */
+function integrity_preview_file(string $fullPath, string $allowedRoot1, string $allowedRoot2 = ''): array {
+    $empty = ['ok' => false, 'content' => '', 'truncated' => false, 'binary' => false, 'size' => 0, 'error' => ''];
+
+    if ($fullPath === '' || str_contains($fullPath, "\0") || str_contains($fullPath, '..')) {
+        return array_merge($empty, ['error' => 'Invalid path.']);
+    }
+
+    $real = realpath($fullPath);
+    if ($real === false) {
+        return array_merge($empty, ['error' => 'File not found: ' . $fullPath]);
+    }
+
+    // Must be under one of the allowed roots
+    $inRoot1 = $allowedRoot1 !== '' && str_starts_with($real, rtrim($allowedRoot1, '/') . '/');
+    $inRoot2 = $allowedRoot2 !== '' && str_starts_with($real, rtrim($allowedRoot2, '/') . '/');
+    if (!$inRoot1 && !$inRoot2) {
+        return array_merge($empty, ['error' => 'Path is outside allowed roots.']);
+    }
+
+    if (is_dir($real)) {
+        return array_merge($empty, ['error' => 'Path is a directory, not a file.']);
+    }
+
+    if (!is_readable($real)) {
+        return array_merge($empty, ['error' => 'File is not readable.']);
+    }
+
+    $size = filesize($real);
+    if ($size === false) $size = 0;
+
+    // Read up to preview max
+    $fh = @fopen($real, 'rb');
+    if ($fh === false) {
+        return array_merge($empty, ['error' => 'Cannot open file.']);
+    }
+    $raw = fread($fh, INTEGRITY_PREVIEW_MAX_BYTES + 1);
+    fclose($fh);
+
+    $truncated = strlen($raw) > INTEGRITY_PREVIEW_MAX_BYTES;
+    if ($truncated) $raw = substr($raw, 0, INTEGRITY_PREVIEW_MAX_BYTES);
+
+    // Binary detection: null bytes in first 8 KB
+    $sample = substr($raw, 0, 8192);
+    $binary = str_contains($sample, "\0");
+
+    if ($binary) {
+        return ['ok' => true, 'content' => '', 'truncated' => false, 'binary' => true, 'size' => $size, 'error' => ''];
+    }
+
+    return ['ok' => true, 'content' => $raw, 'truncated' => $truncated, 'binary' => false, 'size' => $size, 'error' => ''];
+}
 

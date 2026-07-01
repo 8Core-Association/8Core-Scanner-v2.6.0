@@ -1,6 +1,25 @@
 # 8Core Integrity — Changelog
 
-## [0.9.0] — 2026-07-01
+## [0.10.0] — 2026-07-01
+
+### Added
+
+- **Result details panel** — Each row in the Integrity results table has an expand (▶) button that opens a three-column details panel directly below the row, showing: result ID, run ID, severity, type, status, both SHA256 hashes, repo/dest sizes, relative and full paths, origin path, destination root, note/error; live stat info (owner:group, permissions, mtime, ctime) for the destination file; and log links.
+- **Secure file preview** — "View destination file" / "View origin file" buttons in the details panel fetch file content via AJAX (`action=preview_file`). Preview is limited to 200 KB, binary files are detected and blocked, path traversal and symlink escape are prevented, HTML is escaped, and content is rendered in a scrollable `<pre>` block.
+- **Run log** — Every `run_structural_check` execution writes a complete log to `/home/8core_integrity/logs/runs/run_<id>.log` with run metadata, exclusions, counts, summary, and errors. "View run log" and "Download log" buttons appear in the run summary bar when the log file exists.
+- **Hash job log** — Every `regenerate_hashes` execution writes a log to `/home/8core_integrity/logs/hash/hash_job_<id>.log` with app/branch/version, file count, error count, and status.
+- **Action log links** — When a result has a queued action (`pending_action`), the details panel shows "View log" / "Download" links for `/home/8core_integrity/logs/actions/action_<id>.log` (written by the root worker).
+- `integrity.php` — `integrity_logs_root()`, `integrity_run_log_path()`, `integrity_hash_log_path()`, `integrity_action_log_path()`: canonical log path helpers.
+- `integrity.php` — `integrity_log_safe_path(string $path): ?string`: validates that a log path is inside the logs root, rejects null bytes and `..` traversal; used by download and view endpoints.
+- `integrity.php` — `integrity_write_run_log()`, `integrity_write_hash_log()`: write structured plain-text log files, creating subdirectories as needed.
+- `integrity.php` — `integrity_preview_file(string $fullPath, string $root1, string $root2 = ''): array`: safe file preview — validates roots, detects binary, respects 200 KB cap, returns escaped-ready raw content.
+- `integrity.php` — `integrity_load_result_by_id(PDO $pdo, int $resultId): ?array`: fetch a single result row by id without requiring run_id (used by preview handler).
+- `admin/module_integrity.php` — `action=preview_file` POST handler (AJAX, early-exit): loads result row, resolves file path for origin or destination source, delegates to `integrity_preview_file()`, returns JSON.
+- `admin/module_integrity.php` — `action=download_log` GET handler (early-exit): validates type (`run`|`hash`|`action`) and id, calls `integrity_log_safe_path()`, serves `text/plain` attachment.
+- `admin/module_integrity.php` — `action=view_log` GET handler (early-exit): same validation, returns JSON with log content for inline display.
+- `install/migrations/20260701_012_add_integrity_actions.sql`: creates `scanner_integrity_actions` table and relaxes `status` column to `VARCHAR(50)`.
+
+
 
 ### Added
 

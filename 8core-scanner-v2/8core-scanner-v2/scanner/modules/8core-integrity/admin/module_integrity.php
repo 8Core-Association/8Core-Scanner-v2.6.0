@@ -134,6 +134,44 @@ function _int_ini_bytes(string $v): int {
     };
 }
 
+// ── Download log (GET, early-exit) ────────────────────────────────────────────
+if (isset($_GET['action']) && $_GET['action'] === 'download_log') {
+    $logType = trim($_GET['type'] ?? '');
+    $logId   = (int) ($_GET['id'] ?? 0);
+    $logPath = match($logType) {
+        'run'    => $logId > 0 ? integrity_run_log_path($logId)         : null,
+        'hash'   => $logId > 0 ? integrity_hash_log_path((string)$logId) : null,
+        'action' => $logId > 0 ? integrity_action_log_path($logId)      : null,
+        default  => null,
+    };
+    if ($logPath === null) { http_response_code(400); echo 'Invalid log type or ID.'; exit; }
+    $safe = integrity_log_safe_path($logPath);
+    if ($safe === null || !file_exists($safe)) { http_response_code(404); echo 'Log not found.'; exit; }
+    header('Content-Type: text/plain; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . basename($safe) . '"');
+    header('Content-Length: ' . filesize($safe));
+    readfile($safe);
+    exit;
+}
+
+// ── View log inline (GET, early-exit) ─────────────────────────────────────────
+if (isset($_GET['action']) && $_GET['action'] === 'view_log') {
+    $logType = trim($_GET['type'] ?? '');
+    $logId   = (int) ($_GET['id'] ?? 0);
+    $logPath = match($logType) {
+        'run'    => $logId > 0 ? integrity_run_log_path($logId)         : null,
+        'hash'   => $logId > 0 ? integrity_hash_log_path((string)$logId) : null,
+        'action' => $logId > 0 ? integrity_action_log_path($logId)      : null,
+        default  => null,
+    };
+    header('Content-Type: application/json; charset=utf-8');
+    if ($logPath === null) { echo json_encode(['ok' => false, 'error' => 'Invalid log type or ID.']); exit; }
+    $safe = integrity_log_safe_path($logPath);
+    if ($safe === null || !file_exists($safe)) { echo json_encode(['ok' => false, 'error' => 'Log not found.']); exit; }
+    echo json_encode(['ok' => true, 'content' => file_get_contents($safe), 'path' => basename($safe)]);
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // ── Detect post_max_size exceeded ──────────────────────────────────────────
@@ -377,7 +415,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!is_dir($repoPath)) {
                 _int_flash_set('err', 'Repository path does not exist: ' . $repoPath);
             } else {
+                $hashJobStarted = date('Y-m-d H:i:s');
                 $hr = integrity_generate_repo_hashes($pdo, $rhApp, $rhBranch, $rhVersion, $repoPath);
+                $hashJobId = $rhApp . '_' . $rhBranch . '_' . $rhVersion . '_' . date('Ymd_His');
+                integrity_write_hash_log($hashJobId, [
+                    'started_at'  => $hashJobStarted,
+                    'finished_at' => date('Y-m-d H:i:s'),
+                    'app'         => $rhApp,
+                    'branch'      => $rhBranch,
+                    'version'     => $rhVersion,
+                    'repo_path'   => $repoPath,
+                    'files'       => $hr['files']  ?? 0,
+                    'errors'      => $hr['errors'] ?? 0,
+                    'status'      => $hr['ok'] ? 'done' : 'failed',
+                    'error_detail' => $hr['error'] ?? '',
+                ]);
                 if ($hr['ok']) {
                     _int_flash_set('ok', 'Hashes regenerated for ' . $rhApp . '/' . $rhBranch . '/' . $rhVersion
                         . ': ' . number_format($hr['files']) . ' file(s), '
@@ -476,6 +528,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $runId = integrity_save_run($pdo, $result['origin'], $result['dest'], $_intDetSoftware, $result['counts'], $preRunExclusions, $checkMode, $summary);
                 if ($runId > 0) {
                     integrity_save_results($pdo, $runId, $result['origin'], $result['dest'], $result['findings']);
+                    // Write run log
+                    integrity_write_run_log($runId, [
+                        'started_at'  => $_SESSION['8int_check_debug']['ts'] ?? date('H:i:s'),
+                        'finished_at' => date('Y-m-d H:i:s'),
+                        'mode'        => $checkMode,
+                        'origin'      => $result['origin'],
+                        'dest'        => $result['dest'],
+                        'software'    => $_intDetSoftware,
+                        'exclusions'  => $preRunExclusions,
+                        'counts'      => $result['counts'],
+                        'summary'     => $summary,
+                        'errors'      => [],
+                    ]);
                     $modeLabel = ($checkMode === 'hash') ? 'Hash check' : 'Structural check';
                     _int_flash_set('ok', $modeLabel . ' complete. '
                         . count($result['findings']) . ' finding(s) found'
@@ -813,6 +878,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = $path !== '' ? integrity_detect_software($path) : ['software' => 'Unknown', 'version' => 'unknown', 'root' => $path, 'error' => 'No path provided.'];
         header('Content-Type: application/json; charset=utf-8');
         echo json_encode($result);
+        exit;
+    }
+
+    // ── AJAX: file preview ─────────────────────────────────────────────────────
+    if ($postAction === 'preview_file') {
+        $resultId = (int) ($_POST['result_id'] ?? 0);
+        $source   = trim($_POST['source'] ?? 'destination'); // destination|origin
+
+        $row = $resultId > 0 ? integrity_load_result_by_id($pdo, $resultId) : null;
+
+        if (!$row) {
+            echo json_encode(['ok' => false, 'error' => 'Result not found.']);
+            exit;
+        }
+
+        if ($source === 'origin') {
+            $filePath    = rtrim($row['origin_path'] ?? '', '/') . '/' . ltrim($row['relative_path'], '/');
+            $allowedRoot = $row['origin_path'] ?? '';
+        } else {
+            $filePath    = $row['full_path'];
+            $allowedRoot = $row['destination_path'] ?? '';
+        }
+
+        $allowedRoot2 = integrity_repo_root();
+        $prev = integrity_preview_file($filePath, $allowedRoot, $allowedRoot2);
+
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'ok'        => $prev['ok'],
+            'error'     => $prev['error'],
+            'content'   => $prev['ok'] && !$prev['binary'] ? $prev['content'] : '',
+            'binary'    => $prev['binary'],
+            'truncated' => $prev['truncated'],
+            'size'      => $prev['size'],
+            'path'      => $filePath,
+            'source'    => $source,
+        ]);
         exit;
     }
 
@@ -1350,6 +1452,44 @@ require __DIR__ . '/../../../includes/version.php';
 .int-fail-rootcmd { margin-top:5px; background:#fffbeb; border:1px solid #fde68a; border-radius:5px; padding:6px 10px; }
 .int-fail-rootcmd-label { font-size:10px; font-weight:700; color:#92400e; margin-bottom:4px; }
 .int-fail-rootcmd pre { margin:0; font-family:var(--font-mono,monospace); font-size:11px; color:#166534; background:#dcfce7; border-radius:4px; padding:6px 8px; white-space:pre-wrap; word-break:break-all; line-height:1.55; }
+
+/* ── Expand button column ── */
+.int-results-table th.col-exp { width:26px; padding:0; }
+.int-expand-btn { background:none; border:none; cursor:pointer; color:#94a3b8; font-size:10px; padding:2px 4px; line-height:1; transition:color .12s, transform .15s; border-radius:3px; }
+.int-expand-btn:hover { color:#2563eb; }
+.int-expand-btn.is-open { transform:rotate(90deg); color:#2563eb; }
+
+/* ── Detail panel row ── */
+.int-detail-row td { background:#f8fafc; }
+.int-detail-panel { display:flex; gap:0; padding:14px 16px; }
+.int-detail-col { flex:1; min-width:0; padding:0 12px; border-right:1px solid #e2e8f0; }
+.int-detail-col:first-child { padding-left:0; flex:0 0 220px; }
+.int-detail-col:last-child  { border-right:none; flex:0 0 240px; }
+.int-detail-col-wide { flex:1 1 auto; }
+.int-detail-group { margin-bottom:8px; }
+.int-detail-label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:#94a3b8; margin-bottom:2px; }
+.int-detail-val { font-size:11px; color:var(--text); }
+.int-detail-mono { font-family:var(--font-mono,monospace); }
+.int-detail-break { word-break:break-all; }
+.int-detail-hash { font-size:10px; word-break:break-all; }
+
+/* ── File preview area ── */
+.int-preview-area { margin-top:8px; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+.int-preview-header { display:flex; align-items:center; justify-content:space-between; padding:5px 10px; background:#f1f5f9; border-bottom:1px solid var(--border); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); }
+.int-preview-header .int-preview-close { background:none; border:none; cursor:pointer; font-size:12px; color:#94a3b8; padding:0 2px; line-height:1; }
+.int-preview-header .int-preview-close:hover { color:#dc2626; }
+.int-preview-body { overflow:auto; max-height:400px; }
+.int-preview-body pre { margin:0; padding:10px 12px; font-family:var(--font-mono,monospace); font-size:11px; line-height:1.65; color:#1e293b; white-space:pre-wrap; word-break:break-all; background:#fff; }
+.int-preview-note { padding:8px 12px; font-size:11px; color:#92400e; background:#fffbeb; }
+.int-preview-loading { padding:10px 12px; font-size:11px; color:#64748b; font-style:italic; }
+
+/* ── Log panel ── */
+.int-log-panel { margin-top:6px; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+.int-log-header { display:flex; align-items:center; justify-content:space-between; padding:5px 10px; background:#f1f5f9; border-bottom:1px solid var(--border); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); }
+.int-log-close { background:none; border:none; cursor:pointer; font-size:12px; color:#94a3b8; padding:0 2px; line-height:1; }
+.int-log-close:hover { color:#dc2626; }
+.int-log-body { overflow:auto; max-height:340px; }
+.int-log-body pre { margin:0; padding:10px 12px; font-family:var(--font-mono,monospace); font-size:11px; line-height:1.65; color:#1e293b; white-space:pre-wrap; word-break:break-all; background:#fff; }
 
 /* ── Summary counters in run bar ── */
 .int-summary-counters { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:3px; }
@@ -2375,8 +2515,26 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                   Clear run
                 </button>
               </form>
+              <?php
+                $_intRunLogPath = integrity_run_log_path((int)$_intRunId);
+                if (file_exists($_intRunLogPath)):
+              ?>
+              <button type="button" class="btn btn-ghost" style="font-size:11px;padding:4px 10px;"
+                      id="int-run-log-view-btn"
+                      data-log-type="run" data-log-id="<?= (int)$_intRunId ?>"
+                      data-panel-id="int-run-log-panel">
+                View run log
+              </button>
+              <a href="module.php?module=8core-integrity&page=module_integrity&action=download_log&type=run&id=<?= (int)$_intRunId ?>"
+                 class="btn btn-ghost" style="font-size:11px;padding:4px 10px;text-decoration:none;" target="_blank">
+                Download log
+              </a>
+              <?php endif; ?>
             </div>
           </div>
+          <?php if (file_exists(integrity_run_log_path((int)$_intRunId))): ?>
+          <div class="int-log-panel" id="int-run-log-panel" style="display:none;margin-bottom:12px;"></div>
+          <?php endif; ?>
 
           <!-- Filter bar (result filters only — not scan exclusions) -->
           <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px;">
@@ -2482,6 +2640,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               <thead>
                 <tr>
                   <th class="col-cb"><input type="checkbox" id="int-cb-all" title="Toggle all"></th>
+                  <th class="col-exp"></th>
                   <th class="col-id">ID</th>
                   <th>Severity</th>
                   <th>Type</th>
@@ -2506,11 +2665,14 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                   $__failError  = $__failDetail['error'] ?? ($isFailed ? $r['note'] : '');
                   $__failRootCmd = $__failDetail['root_cmd'] ?? '';
                 ?>
-                <tr class="<?= $__trClass ?>">
+                <tr class="<?= $__trClass ?>" data-result-id="<?= (int)$r['id'] ?>">
                   <td>
                     <?php if (!$isActioned): ?>
                     <input type="checkbox" name="result_ids[]" value="<?= (int)$r['id'] ?>" class="int-row-cb">
                     <?php endif; ?>
+                  </td>
+                  <td class="col-exp">
+                    <button type="button" class="int-expand-btn" data-result-id="<?= (int)$r['id'] ?>" title="Show details">&#9654;</button>
                   </td>
                   <td style="font-family:var(--font-mono,monospace);font-size:11px;color:var(--text-muted);"><?= (int)$r['id'] ?></td>
                   <td><span class="int-sev-badge <?= h($r['severity']) ?>"><?= strtoupper(h($r['severity'])) ?></span></td>
@@ -2737,6 +2899,199 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                     <span style="font-size:11px;color:var(--text-muted);">—</span>
                     <?php endif; ?>
                     <?php endif; ?>
+                  </td>
+                </tr>
+                <?php
+                  // Extract action_id from note if pending
+                  $__actionId = 0;
+                  if (preg_match('/^action_id:(\d+)$/', $r['note'] ?? '', $__am)) {
+                      $__actionId = (int)$__am[1];
+                  }
+                  $__isDir  = str_contains($r['type'], 'DIRECTORY') || str_contains($r['type'], 'FOLDER');
+                  $__canPrevDest   = !$__isDir && in_array($r['type'], ['EXTRA_FILE','MODIFIED_FILE'], true);
+                  $__canPrevOrigin = !$__isDir && in_array($r['type'], ['MISSING_FILE','MODIFIED_FILE'], true);
+                  $__tabBase = h($_intTabBase);
+                  $__ajaxBase = h($_intTabBase);
+                ?>
+                <tr class="int-detail-row" id="int-detail-<?= (int)$r['id'] ?>" style="display:none;">
+                  <td colspan="9" style="padding:0;border-bottom:2px solid #2563eb;">
+                    <div class="int-detail-panel">
+
+                      <!-- Left column: IDs + hashes + sizes -->
+                      <div class="int-detail-col">
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Result ID</div>
+                          <div class="int-detail-val"><?= (int)$r['id'] ?></div>
+                        </div>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Run ID</div>
+                          <div class="int-detail-val"><?= (int)$r['run_id'] ?></div>
+                        </div>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Severity</div>
+                          <div class="int-detail-val"><span class="int-sev-badge <?= h($r['severity']) ?>"><?= strtoupper(h($r['severity'])) ?></span></div>
+                        </div>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Type</div>
+                          <div class="int-detail-val int-detail-mono"><?= h($r['type']) ?></div>
+                        </div>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Status</div>
+                          <div class="int-detail-val"><span class="int-status-badge <?= h($r['status']) ?>"><?= h(str_replace('_', ' ', $r['status'])) ?></span></div>
+                        </div>
+                        <?php if ($r['repo_sha256']): ?>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Repo SHA256</div>
+                          <div class="int-detail-val int-detail-mono int-detail-hash"><?= h($r['repo_sha256']) ?></div>
+                        </div>
+                        <?php endif; ?>
+                        <?php if ($r['destination_sha256']): ?>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Dest SHA256</div>
+                          <div class="int-detail-val int-detail-mono int-detail-hash <?= ($r['repo_sha256'] && $r['destination_sha256'] && $r['repo_sha256'] !== $r['destination_sha256']) ? 'int-hash-differ' : '' ?>"><?= h($r['destination_sha256']) ?></div>
+                        </div>
+                        <?php endif; ?>
+                        <?php if ($r['repo_size'] !== null): ?>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Repo size</div>
+                          <div class="int-detail-val"><?= number_format((int)$r['repo_size']) ?> B</div>
+                        </div>
+                        <?php endif; ?>
+                        <?php if ($r['destination_size'] !== null): ?>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Dest size</div>
+                          <div class="int-detail-val"><?= number_format((int)$r['destination_size']) ?> B</div>
+                        </div>
+                        <?php endif; ?>
+                      </div>
+
+                      <!-- Middle column: paths + file preview -->
+                      <div class="int-detail-col int-detail-col-wide">
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Relative path</div>
+                          <div class="int-detail-val int-detail-mono int-detail-break"><?= h($r['relative_path']) ?></div>
+                        </div>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Full path (destination)</div>
+                          <div class="int-detail-val int-detail-mono int-detail-break"><?= h($r['full_path']) ?></div>
+                        </div>
+                        <?php if (!empty($r['origin_path'])): ?>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Origin path</div>
+                          <div class="int-detail-val int-detail-mono int-detail-break"><?= h($r['origin_path']) ?></div>
+                        </div>
+                        <?php endif; ?>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Destination root</div>
+                          <div class="int-detail-val int-detail-mono int-detail-break"><?= h($r['destination_path']) ?></div>
+                        </div>
+                        <?php if (!empty($r['note']) && !preg_match('/^action_id:\d+$/', $r['note'])): ?>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Note / error</div>
+                          <div class="int-detail-val int-detail-mono int-detail-break" style="color:<?= $isFailed ? '#dc2626' : 'var(--text-muted)' ?>;"><?= h($r['note']) ?></div>
+                        </div>
+                        <?php endif; ?>
+
+                        <!-- File preview controls -->
+                        <?php if ($__canPrevDest || $__canPrevOrigin): ?>
+                        <div class="int-detail-group" style="margin-top:4px;">
+                          <div class="int-detail-label">File preview</div>
+                          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:3px;">
+                            <?php if ($__canPrevDest): ?>
+                            <button type="button" class="int-btn-act int-preview-btn"
+                                    data-result-id="<?= (int)$r['id'] ?>"
+                                    data-source="destination"
+                                    style="font-size:11px;padding:3px 9px;">
+                              View destination file
+                            </button>
+                            <?php endif; ?>
+                            <?php if ($__canPrevOrigin): ?>
+                            <button type="button" class="int-btn-act int-preview-btn"
+                                    data-result-id="<?= (int)$r['id'] ?>"
+                                    data-source="origin"
+                                    style="font-size:11px;padding:3px 9px;">
+                              View origin file
+                            </button>
+                            <?php endif; ?>
+                          </div>
+                          <div class="int-preview-area" id="int-prev-<?= (int)$r['id'] ?>" style="display:none;"></div>
+                        </div>
+                        <?php endif; ?>
+                      </div>
+
+                      <!-- Right column: stat info + log links -->
+                      <div class="int-detail-col">
+                        <?php
+                          // Try to get live stat for dest file
+                          $__stat = (!$__isDir && $r['full_path'] && file_exists($r['full_path']))
+                              ? stat($r['full_path']) : false;
+                          $__fowner = '';
+                          if ($__stat && function_exists('posix_getpwuid')) {
+                              $__pw = @posix_getpwuid($__stat['uid']);
+                              $__gr = @posix_getgrgid($__stat['gid']);
+                              $__fowner = ($__pw['name'] ?? $__stat['uid']) . ':' . ($__gr['name'] ?? $__stat['gid']);
+                          }
+                          $__fperms = $__stat ? substr(sprintf('%o', $__stat['mode']), -4) : '';
+                        ?>
+                        <?php if ($__fowner): ?>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Owner:group</div>
+                          <div class="int-detail-val int-detail-mono"><?= h($__fowner) ?></div>
+                        </div>
+                        <?php endif; ?>
+                        <?php if ($__fperms): ?>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Permissions</div>
+                          <div class="int-detail-val int-detail-mono"><?= h($__fperms) ?></div>
+                        </div>
+                        <?php endif; ?>
+                        <?php if ($__stat): ?>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Modified (mtime)</div>
+                          <div class="int-detail-val int-detail-mono"><?= date('Y-m-d H:i:s', $__stat['mtime']) ?></div>
+                        </div>
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Changed (ctime)</div>
+                          <div class="int-detail-val int-detail-mono"><?= date('Y-m-d H:i:s', $__stat['ctime']) ?></div>
+                        </div>
+                        <?php endif; ?>
+
+                        <!-- Run log links -->
+                        <div class="int-detail-group" style="margin-top:8px;">
+                          <div class="int-detail-label">Run log</div>
+                          <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:3px;">
+                            <button type="button" class="int-btn-act int-log-view-btn"
+                                    data-log-type="run" data-log-id="<?= (int)$r['run_id'] ?>"
+                                    data-panel-id="int-log-<?= (int)$r['id'] ?>-run"
+                                    style="font-size:10px;padding:2px 7px;">View log</button>
+                            <a href="module.php?module=8core-integrity&page=module_integrity&action=download_log&type=run&id=<?= (int)$r['run_id'] ?>"
+                               class="int-btn-act" style="font-size:10px;padding:2px 7px;text-decoration:none;" target="_blank">
+                              Download
+                            </a>
+                          </div>
+                          <div class="int-log-panel" id="int-log-<?= (int)$r['id'] ?>-run" style="display:none;"></div>
+                        </div>
+
+                        <?php if ($__actionId > 0): ?>
+                        <!-- Action log links -->
+                        <div class="int-detail-group">
+                          <div class="int-detail-label">Action #<?= $__actionId ?> log</div>
+                          <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:3px;">
+                            <button type="button" class="int-log-view-btn int-btn-act"
+                                    data-log-type="action" data-log-id="<?= $__actionId ?>"
+                                    data-panel-id="int-log-<?= (int)$r['id'] ?>-act"
+                                    style="font-size:10px;padding:2px 7px;">View log</button>
+                            <a href="module.php?module=8core-integrity&page=module_integrity&action=download_log&type=action&id=<?= $__actionId ?>"
+                               class="int-btn-act" style="font-size:10px;padding:2px 7px;text-decoration:none;" target="_blank">
+                              Download
+                            </a>
+                          </div>
+                          <div class="int-log-panel" id="int-log-<?= (int)$r['id'] ?>-act" style="display:none;"></div>
+                        </div>
+                        <?php endif; ?>
+                      </div>
+
+                    </div><!-- /.int-detail-panel -->
                   </td>
                 </tr>
                 <?php endforeach; ?>
@@ -3151,6 +3506,180 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   if (saveToggle && saveForm) {
     saveToggle.addEventListener('click', function () {
       saveForm.classList.toggle('is-open');
+    });
+  }
+})();
+
+// ── Details panel: expand/collapse ───────────────────────────────────────────
+(function () {
+  var AJAX_URL  = 'module.php?module=8core-integrity&page=module_integrity';
+  var csrfToken = (document.querySelector('meta[name=csrf-token]') || {}).content || '';
+
+  function intPost(data, cb) {
+    var fd = new FormData();
+    fd.append('csrf_token', csrfToken);
+    for (var k in data) fd.append(k, data[k]);
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', AJAX_URL);
+    xhr.onload = function () {
+      try { cb(null, JSON.parse(xhr.responseText)); }
+      catch (e) { cb('JSON parse error', null); }
+    };
+    xhr.onerror = function () { cb('Network error', null); };
+    xhr.send(fd);
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // Expand buttons
+  document.querySelectorAll('.int-expand-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id      = btn.dataset.resultId;
+      var detRow  = document.getElementById('int-detail-' + id);
+      if (!detRow) return;
+      var open = btn.classList.toggle('is-open');
+      detRow.style.display = open ? '' : 'none';
+    });
+  });
+
+  // File preview buttons
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.int-preview-btn');
+    if (!btn) return;
+    var resultId = btn.dataset.resultId;
+    var source   = btn.dataset.source;
+    var area     = document.getElementById('int-prev-' + resultId);
+    if (!area) return;
+
+    // If same source is already showing, toggle off
+    if (area.dataset.loadedSource === source && area.style.display !== 'none') {
+      area.style.display = 'none';
+      area.dataset.loadedSource = '';
+      return;
+    }
+
+    area.style.display = '';
+    area.innerHTML = '<div class="int-preview-loading">Loading\u2026</div>';
+    area.dataset.loadedSource = source;
+
+    intPost({ action: 'preview_file', result_id: resultId, source: source }, function (err, data) {
+      if (err || !data) {
+        area.innerHTML = '<div class="int-preview-note">Error loading preview.</div>';
+        return;
+      }
+      if (!data.ok) {
+        area.innerHTML = '<div class="int-preview-note">' + escHtml(data.error || 'Preview unavailable.') + '</div>';
+        return;
+      }
+      if (data.binary) {
+        area.innerHTML = '<div class="int-preview-note">Binary file \u2014 text preview disabled.</div>';
+        return;
+      }
+      var label = (source === 'origin' ? 'Origin' : 'Destination') + ': ' + escHtml(data.path);
+      var sizeKb = Math.round((data.size || 0) / 1024);
+      var html = '<div class="int-preview-header">'
+               + '<span>' + label + '</span>'
+               + '<div style="display:flex;align-items:center;gap:8px;">'
+               + (data.truncated ? '<span style="color:#d97706;">Truncated \u2014 first 200\u00a0KB shown</span>' : '')
+               + '<span>' + sizeKb + '\u00a0KB</span>'
+               + '<button type="button" class="int-preview-close" title="Close">&times;</button>'
+               + '</div></div>'
+               + '<div class="int-preview-body"><pre>' + escHtml(data.content) + '</pre></div>';
+      area.innerHTML = html;
+      area.querySelector('.int-preview-close').addEventListener('click', function () {
+        area.style.display = 'none';
+        area.dataset.loadedSource = '';
+      });
+    });
+  });
+
+  // Log view buttons
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.int-log-view-btn');
+    if (!btn) return;
+    var logType  = btn.dataset.logType;
+    var logId    = btn.dataset.logId;
+    var panelId  = btn.dataset.panelId;
+    var panel    = document.getElementById(panelId);
+    if (!panel) return;
+
+    // Toggle off if already showing
+    if (panel.style.display !== 'none' && panel.innerHTML !== '') {
+      panel.style.display = 'none';
+      return;
+    }
+
+    panel.style.display = '';
+    panel.innerHTML = '<div style="padding:8px 12px;font-size:11px;color:#64748b;font-style:italic;">Loading\u2026</div>';
+
+    var url = AJAX_URL + '&action=view_log&type=' + encodeURIComponent(logType) + '&id=' + encodeURIComponent(logId);
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', url);
+    xhr.onload = function () {
+      try {
+        var data = JSON.parse(xhr.responseText);
+        if (!data.ok) {
+          panel.innerHTML = '<div style="padding:8px 12px;font-size:11px;color:#dc2626;">' + escHtml(data.error || 'Log not found.') + '</div>';
+          return;
+        }
+        panel.innerHTML = '<div class="int-log-header">'
+                        + '<span>' + escHtml(data.path) + '</span>'
+                        + '<button type="button" class="int-log-close" title="Close">&times;</button>'
+                        + '</div>'
+                        + '<div class="int-log-body"><pre>' + escHtml(data.content) + '</pre></div>';
+        panel.querySelector('.int-log-close').addEventListener('click', function () {
+          panel.style.display = 'none';
+        });
+      } catch (ex) {
+        panel.innerHTML = '<div style="padding:8px 12px;font-size:11px;color:#dc2626;">Parse error.</div>';
+      }
+    };
+    xhr.onerror = function () {
+      panel.innerHTML = '<div style="padding:8px 12px;font-size:11px;color:#dc2626;">Network error.</div>';
+    };
+    xhr.send();
+  });
+
+  // Run log view button in the summary bar
+  var runLogBtn = document.getElementById('int-run-log-view-btn');
+  if (runLogBtn) {
+    runLogBtn.addEventListener('click', function () {
+      var panelId = runLogBtn.dataset.panelId;
+      var logType = runLogBtn.dataset.logType;
+      var logId   = runLogBtn.dataset.logId;
+      var panel   = document.getElementById(panelId);
+      if (!panel) return;
+      if (panel.style.display !== 'none' && panel.innerHTML !== '') {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      panel.innerHTML = '<div style="padding:8px 12px;font-size:11px;color:#64748b;font-style:italic;">Loading\u2026</div>';
+      var url = AJAX_URL + '&action=view_log&type=' + encodeURIComponent(logType) + '&id=' + encodeURIComponent(logId);
+      var xhr2 = new XMLHttpRequest();
+      xhr2.open('GET', url);
+      xhr2.onload = function () {
+        try {
+          var data = JSON.parse(xhr2.responseText);
+          if (!data.ok) {
+            panel.innerHTML = '<div style="padding:8px 12px;font-size:11px;color:#dc2626;">' + escHtml(data.error || 'Log not found.') + '</div>';
+            return;
+          }
+          panel.innerHTML = '<div class="int-log-header">'
+                          + '<span>' + escHtml(data.path) + '</span>'
+                          + '<button type="button" class="int-log-close" title="Close">&times;</button>'
+                          + '</div>'
+                          + '<div class="int-log-body"><pre>' + escHtml(data.content) + '</pre></div>';
+          panel.querySelector('.int-log-close').addEventListener('click', function () {
+            panel.style.display = 'none';
+          });
+        } catch (ex) {
+          panel.innerHTML = '<div style="padding:8px 12px;font-size:11px;color:#dc2626;">Parse error.</div>';
+        }
+      };
+      xhr2.send();
     });
   }
 })();
