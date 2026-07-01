@@ -25,7 +25,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $anyFailed = false;
         foreach ($results as $r) {
             $_intMessages[] = [
-                'ok'   => $r['ok'],
+                'type' => $r['ok'] ? 'ok' : 'err',
                 'text' => ($r['ok'] ? 'OK' : 'FAIL') . '  ' . $r['path'] . '  [' . $r['note'] . ']',
             ];
             if (!$r['ok']) $anyFailed = true;
@@ -33,7 +33,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($anyFailed) {
             $_intShowRootCmd = true;
             $root = integrity_repo_root();
-            $dirs = implode(" \\\n         ", array_map(fn($d) => $d, integrity_default_dirs()));
+            $dirs = implode(" \\\n         ", integrity_default_dirs());
             $_intRootCmd = "mkdir -p " . $dirs . "\nchown -R {webuser}:{webuser} {$root}";
         }
     }
@@ -41,18 +41,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($postAction === 'add_custom_dir') {
         $name = strtolower(trim($_POST['folder_name'] ?? ''));
         if (!preg_match('/^[a-z0-9_-]+$/', $name)) {
-            $_intMessages[] = ['ok' => false, 'text' => 'FAIL  Invalid folder name "' . $name . '". Use only: a-z 0-9 _ -'];
+            $_intMessages[] = ['type' => 'err', 'text' => 'FAIL  Invalid folder name "' . h($name) . '". Use only: a-z 0-9 _ -'];
         } else {
             $r = integrity_create_custom_dir($name);
-            $_intMessages[] = [
-                'ok'   => $r['ok'],
-                'text' => ($r['ok'] ? 'OK' : 'FAIL') . '  ' . $r['path'] . '  [' . $r['note'] . ']',
-            ];
-            if (!$r['ok']) {
+            if ($r['exists']) {
+                $_intMessages[] = ['type' => 'warn', 'text' => 'Custom repository "' . h($name) . '" already exists.'];
+            } elseif ($r['ok']) {
+                $_intMessages[] = ['type' => 'ok', 'text' => 'OK  ' . $r['path'] . '  [created]'];
+            } else {
+                $_intMessages[] = ['type' => 'err', 'text' => 'FAIL  ' . $r['path'] . '  [' . $r['note'] . ']'];
                 $_intShowRootCmd = true;
                 $root = integrity_repo_root();
-                $_intRootCmd = "mkdir -p {$root}/custom/" . htmlspecialchars($name, ENT_QUOTES, 'UTF-8')
-                    . "\nchown -R {webuser}:{webuser} {$root}";
+                $_intRootCmd = "mkdir -p {$root}/custom/" . $name
+                    . "\nchown -R {webuser}:{webuser} {$root}/custom/" . $name;
             }
         }
     }
@@ -101,6 +102,7 @@ require __DIR__ . '/../../../includes/version.php';
 .msg-list li { font-family:var(--font-mono,monospace); font-size:12px; padding:3px 0; border-bottom:1px solid var(--border); }
 .msg-list li:last-child { border-bottom:none; }
 .msg-ok  { color:#16a34a; }
+.msg-warn { color:#d97706; font-style:italic; }
 .msg-err { color:#dc2626; }
 
 /* ── Root cmd box ── */
@@ -147,7 +149,7 @@ require __DIR__ . '/../../../includes/version.php';
     <div class="int-section" style="padding:14px 20px;margin-bottom:16px;">
       <ul class="msg-list" style="margin:0;">
         <?php foreach ($_intMessages as $m): ?>
-          <li class="<?= $m['ok'] ? 'msg-ok' : 'msg-err' ?>"><?= h($m['text']) ?></li>
+          <li class="msg-<?= h($m['type']) ?>"><?= h($m['text']) ?></li>
         <?php endforeach; ?>
       </ul>
       <?php if ($_intShowRootCmd && $_intRootCmd): ?>

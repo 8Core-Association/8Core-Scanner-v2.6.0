@@ -76,16 +76,16 @@ function integrity_ensure_repo_structure(): array {
 
 /**
  * Creates a single custom repository folder inside custom/.
- * Returns ['ok' => bool, 'path' => string, 'note' => string].
+ * Returns ['ok' => bool, 'exists' => bool, 'path' => string, 'note' => string].
  */
 function integrity_create_custom_dir(string $name): array {
     if (!preg_match('/^[a-z0-9_-]+$/', $name)) {
-        return ['ok' => false, 'path' => '', 'note' => 'invalid name'];
+        return ['ok' => false, 'exists' => false, 'path' => '', 'note' => 'invalid name'];
     }
     $path = integrity_repo_root() . '/custom/' . $name;
     if (is_dir($path)) {
-        return ['ok' => true, 'path' => $path, 'note' => 'already exists'];
+        return ['ok' => false, 'exists' => true, 'path' => $path, 'note' => 'already exists'];
     }
     $ok = @mkdir($path, 0755, true);
-    return ['ok' => $ok, 'path' => $path, 'note' => $ok ? 'created' : 'failed'];
+    return ['ok' => $ok, 'exists' => false, 'path' => $path, 'note' => $ok ? 'created' : 'failed'];
 }
