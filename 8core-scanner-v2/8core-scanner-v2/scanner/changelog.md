@@ -6,6 +6,36 @@ Verzioniranje slijedi [Semantic Versioning](https://semver.org/lang/hr/).
 
 ---
 
+## [2.6.5] — 2026-07-01
+
+### Added
+
+- **`admin/modules.php`** — pravi Module Manager UI:
+  - Tablica s kolonama: Module, Key, Version, Description, Status, Actions
+  - Status badge: Active (zeleni) / Disabled (sivi)
+  - Enable/Disable gumbi po modulu (POST forma s CSRF zaštitom)
+  - Ako nema instaliranih modula: "No modules installed yet."
+  - Ako tablica ne postoji: poruka s linkom na Admin Update
+  - Flash poruke nakon akcije (ok/error)
+
+- **`admin/modules_action.php`** — POST handler za enable/disable akcije:
+  - Prima samo POST; CSRF validacija
+  - Validacija: action mora biti `enable` ili `disable`, `module_key` ne smije biti prazan
+  - Provjera postojanja tablice i modula u bazi
+  - Koristi `scanner_module_set_active()` iz `includes/modules.php`
+  - PRG redirect na `modules.php` s flash porukom
+
+### Fixed
+
+- **`includes/version.php`** — `SCANNER_VERSION` usklađen s `VERSION` fajlom (`2.6.0` → `2.6.5`); sidebar admin panela sada prikazuje ispravnu verziju
+
+### Not changed
+
+- Module discovery/install iz manifesta planiran za sljedeći update
+- Nema Prescan modula, nema modules foldera
+
+---
+
 ## [2.6.4] — 2026-07-01
 
 ### Added
