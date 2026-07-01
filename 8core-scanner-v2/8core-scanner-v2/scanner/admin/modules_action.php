@@ -42,12 +42,12 @@ function valid_module_key(string $key): bool {
  * Returns the array on success or null on failure.
  */
 function load_manifest(string $path): ?array {
-    if (!file_exists($path)) return null;
-    $m = @include $path;
+    if (!is_file($path) || !is_readable($path)) return null;
+    $m = include $path;
     if (!is_array($m)) return null;
     $key = isset($m['module_key']) ? trim($m['module_key']) : '';
-    if (!valid_module_key($key))                         return null;
-    if (empty($m['name']))                               return null;
+    if (!valid_module_key($key))    return null;
+    if (empty($m['name']))          return null;
     $m['module_key'] = $key;
     return $m;
 }
@@ -294,6 +294,45 @@ if (in_array($action, ['enable', 'disable'], true)) {
 
     $label = htmlspecialchars($mod['name'], ENT_QUOTES, 'UTF-8');
     mod_flash('Modul "' . $label . '" je ' . ($active ? 'omogućen' : 'onemogućen') . '.');
+    mod_redirect();
+}
+
+// ── ACTION: sync — sync DB record from installed manifest ──────────────────────
+if ($action === 'sync') {
+    $moduleKey = isset($_POST['module_key']) ? trim($_POST['module_key']) : '';
+
+    if (!valid_module_key($moduleKey)) {
+        mod_flash('Neispravan module_key.', 'error');
+        mod_redirect();
+    }
+
+    if (!scanner_modules_table_exists($pdo)) {
+        mod_flash('Tablica scanner_modules ne postoji. Primijeni migracije.', 'error');
+        mod_redirect();
+    }
+
+    $existing = scanner_module_get($pdo, $moduleKey);
+    if (!$existing) {
+        mod_flash('Modul "' . htmlspecialchars($moduleKey, ENT_QUOTES, 'UTF-8') . '" nije instaliran u DB.', 'error');
+        mod_redirect();
+    }
+
+    $manifestPath = $modulesBaseDir . '/' . $moduleKey . '/module.php';
+    $manifest     = load_manifest($manifestPath);
+    if (!$manifest) {
+        mod_flash('Manifest za modul "' . htmlspecialchars($moduleKey, ENT_QUOTES, 'UTF-8') . '" nije čitljiv ili je neispravan.', 'error');
+        mod_redirect();
+    }
+
+    scanner_module_install(
+        $pdo,
+        $manifest['module_key'],
+        $manifest['name'],
+        $manifest['description'] ?? null,
+        $manifest['version'] ?? null
+    );
+
+    mod_flash('Modul "' . htmlspecialchars($manifest['name'], ENT_QUOTES, 'UTF-8') . '" sinkroniziran: v' . htmlspecialchars($manifest['version'] ?? '?', ENT_QUOTES, 'UTF-8') . '.');
     mod_redirect();
 }
 

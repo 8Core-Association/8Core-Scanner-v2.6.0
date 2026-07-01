@@ -269,7 +269,16 @@ foreach ($discoveredModules as $key => $info) {
                 &nbsp;|&nbsp;
                 Admin menu: <span class="<?= !empty($dbgMenuItems) ? 'dbg-ok' : 'dbg-err' ?>"><?= !empty($dbgMenuItems) ? 'YES (' . count($dbgMenuItems) . ' item)' : 'NO' ?></span>
                 <?php if (!empty($dbgMenuItems)): ?>
-                  &nbsp;|&nbsp; URL: <code><?= h($dbgMenuItems[0]['url']) ?></code>
+                  &nbsp;|&nbsp; Open URL: <code><?= h($dbgMenuItems[0]['url']) ?></code>
+                <?php endif; ?>
+                <?php if ($dbgManifest && $dbgManifest['version'] !== ($mod['version'] ?? null)): ?>
+                  &nbsp;|&nbsp;
+                  <form method="post" action="modules_action.php" style="display:inline;">
+                    <input type="hidden" name="action" value="sync">
+                    <input type="hidden" name="module_key" value="<?= h($mod['module_key']) ?>">
+                    <?= csrf_field() ?>
+                    <button type="submit" class="btn btn-primary" style="font-size:11px;padding:2px 8px;">Sync DB from manifest</button>
+                  </form>
                 <?php endif; ?>
               </td>
             </tr>
