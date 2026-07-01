@@ -241,6 +241,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         unset($_SESSION['8int_zip'][$token]);
         if ($stored && isset($stored['path'])) @unlink($stored['path']);
     }
+
+    // ── AJAX: browse directory ─────────────────────────────────────────────────
+    if ($postAction === 'browse_dir') {
+        $requestedPath = trim($_POST['path'] ?? '/home');
+        $result        = integrity_browse_dir($requestedPath);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($result);
+        exit;
+    }
+
+    // ── AJAX: detect software ──────────────────────────────────────────────────
+    if ($postAction === 'detect_software') {
+        $path   = trim($_POST['path'] ?? '');
+        $result = $path !== '' ? integrity_detect_software($path) : ['software' => 'Unknown', 'version' => 'unknown', 'root' => $path, 'error' => 'No path provided.'];
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($result);
+        exit;
+    }
 }
 
 /**
@@ -404,6 +422,48 @@ require __DIR__ . '/../../../includes/version.php';
 .int-field select { width:100%; box-sizing:border-box; }
 .int-placeholder { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:14px 16px; font-size:13px; color:var(--text-muted); margin-top:12px; }
 
+/* ── Destination row ── */
+.int-dest-row { display:flex; gap:6px; align-items:stretch; }
+.int-dest-row input[type=text] { flex:1; min-width:0; }
+.int-browse-btn { white-space:nowrap; font-size:12px; padding:7px 12px; }
+
+/* ── Detection box ── */
+.int-detect-box { margin-top:10px; border:1px solid var(--border); border-radius:7px; overflow:hidden; }
+.int-detect-loading { display:flex; align-items:center; gap:8px; padding:12px 14px; font-size:12px; color:var(--text-muted); }
+.int-detect-spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--border); border-top-color:#2563eb; border-radius:50%; animation:int-spin .7s linear infinite; flex-shrink:0; }
+@keyframes int-spin { to { transform:rotate(360deg); } }
+.int-detect-title { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-muted); padding:10px 14px 4px; }
+.int-detect-grid { display:grid; grid-template-columns:80px 1fr; gap:4px 10px; padding:0 14px 10px; font-size:12px; }
+.int-detect-key { color:var(--text-muted); font-size:11px; align-self:center; }
+.int-detect-val { color:var(--text); font-family:var(--font-mono,monospace); font-size:12px; font-weight:600; }
+.int-detect-path { font-weight:400; word-break:break-all; }
+.int-detect-warning { margin:0 10px 10px; padding:8px 10px; background:#fffbeb; border:1px solid #fde68a; border-radius:5px; font-size:11px; color:#92400e; }
+
+/* ── Path browser modal ── */
+.int-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:9000; display:flex; align-items:center; justify-content:center; }
+.int-modal { background:var(--surface,#fff); border:1px solid var(--border); border-radius:10px; box-shadow:0 8px 32px rgba(0,0,0,.22); width:520px; max-width:calc(100vw - 32px); max-height:80vh; display:flex; flex-direction:column; overflow:hidden; }
+.int-modal-header { display:flex; align-items:center; justify-content:space-between; padding:14px 18px 10px; border-bottom:1px solid var(--border); flex-shrink:0; }
+.int-modal-title { font-size:14px; font-weight:700; color:var(--text); }
+.int-modal-close { background:none; border:none; font-size:20px; color:var(--text-muted); cursor:pointer; line-height:1; padding:0 2px; }
+.int-modal-close:hover { color:var(--text); }
+.int-modal-breadcrumb { padding:8px 18px; border-bottom:1px solid var(--border); font-size:11px; color:var(--text-muted); flex-shrink:0; display:flex; align-items:center; flex-wrap:wrap; gap:2px; min-height:34px; }
+.int-bc-seg { cursor:default; padding:1px 3px; border-radius:3px; }
+.int-bc-link { cursor:pointer; color:#2563eb; }
+.int-bc-link:hover { background:rgba(37,99,235,.08); }
+.int-bc-sep { color:var(--border); margin:0 1px; }
+.int-modal-body { flex:1; overflow-y:auto; padding:8px 0; min-height:120px; }
+.int-browse-loading,.int-browse-error,.int-browse-empty { padding:20px 18px; font-size:13px; color:var(--text-muted); }
+.int-browse-error { color:#dc2626; }
+.int-dir-list { list-style:none; margin:0; padding:0; }
+.int-dir-item { display:flex; align-items:center; gap:9px; padding:8px 18px; cursor:pointer; font-size:13px; color:var(--text); transition:background .1s; user-select:none; }
+.int-dir-item:hover { background:var(--surface2,#f8fafc); }
+.int-dir-item.is-selected { background:rgba(37,99,235,.1); color:#1d4ed8; }
+.int-dir-icon { font-size:9px; color:var(--text-muted); flex-shrink:0; width:10px; text-align:center; }
+.int-dir-name { font-family:var(--font-mono,monospace); font-size:12px; }
+.int-modal-footer { border-top:1px solid var(--border); padding:10px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-shrink:0; }
+.int-modal-current-path { font-family:var(--font-mono,monospace); font-size:11px; color:var(--text-muted); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.int-modal-actions { display:flex; gap:8px; flex-shrink:0; }
+
 @media (max-width:720px) {
   .int-form-grid { grid-template-columns:1fr; }
   .int-tree-wrap { flex-direction:column; }
@@ -425,7 +485,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   <div class="topbar">
     <div class="topbar-title">8Core Integrity</div>
     <div class="topbar-meta">
-      <span style="font-size:12px;color:var(--text-muted);">v0.2.0</span>
+      <span style="font-size:12px;color:var(--text-muted);">v0.3.0</span>
       &nbsp;&nbsp;<a href="../logout.php" style="color:var(--text-muted);font-size:12px;">Odjava</a>
     </div>
   </div>
@@ -746,10 +806,12 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
       </div>
       <hr class="int-divider">
       <div class="int-body">
-        <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
+        <form method="post" action="module.php?module=8core-integrity&page=module_integrity" id="int-check-form">
           <input type="hidden" name="action" value="integrity_check">
           <?= csrf_field() ?>
           <div class="int-form-grid">
+
+            <!-- Origin -->
             <div class="int-field">
               <label>Origin / Repository path</label>
               <?php if (!empty($_intAllImported)): ?>
@@ -770,13 +832,44 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                      value="<?= h($_POST['origin_path'] ?? '') ?>">
               <?php endif; ?>
             </div>
+
+            <!-- Destination -->
             <div class="int-field">
               <label>Destination / Installation path</label>
-              <input type="text" name="dest_path"
-                     placeholder="/home/client/public_html"
-                     value="<?= h($_POST['dest_path'] ?? '') ?>">
+              <div class="int-dest-row">
+                <input type="text" name="dest_path" id="int-dest-path"
+                       placeholder="/home/client/public_html"
+                       value="<?= h($_POST['dest_path'] ?? '') ?>"
+                       autocomplete="off">
+                <button type="button" class="btn btn-ghost int-browse-btn" id="int-browse-btn">
+                  Browse /home
+                </button>
+              </div>
+
+              <!-- Detection result box (hidden until path is set) -->
+              <div class="int-detect-box" id="int-detect-box" style="display:none;">
+                <div class="int-detect-loading" id="int-detect-loading" style="display:none;">
+                  <span class="int-detect-spinner"></span> Detecting software&hellip;
+                </div>
+                <div id="int-detect-result" style="display:none;">
+                  <div class="int-detect-title">Detected installation</div>
+                  <div class="int-detect-grid">
+                    <span class="int-detect-key">Software</span>
+                    <span class="int-detect-val" id="int-det-software">&mdash;</span>
+                    <span class="int-detect-key">Version</span>
+                    <span class="int-detect-val" id="int-det-version">&mdash;</span>
+                    <span class="int-detect-key">Root</span>
+                    <span class="int-detect-val int-detect-path" id="int-det-root">&mdash;</span>
+                  </div>
+                  <div class="int-detect-warning" id="int-detect-warning" style="display:none;">
+                    Software could not be identified. You can still run the check manually.
+                  </div>
+                </div>
+              </div>
             </div>
+
           </div>
+
           <button type="submit" class="btn btn-primary" disabled title="Available after hash database implementation">
             Run Integrity Check
           </button>
@@ -790,5 +883,204 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   </div>
 </div>
 </div>
+
+<!-- ── Browse /home modal ─────────────────────────────────────────────────── -->
+<div class="int-modal-overlay" id="int-browse-modal" style="display:none;" role="dialog" aria-modal="true" aria-label="Browse /home">
+  <div class="int-modal">
+    <div class="int-modal-header">
+      <div class="int-modal-title">Browse /home</div>
+      <button type="button" class="int-modal-close" id="int-browse-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="int-modal-breadcrumb" id="int-breadcrumb"></div>
+    <div class="int-modal-body" id="int-browse-body">
+      <div class="int-browse-loading">Loading&hellip;</div>
+    </div>
+    <div class="int-modal-footer">
+      <span class="int-modal-current-path" id="int-modal-current-path"></span>
+      <div class="int-modal-actions">
+        <button type="button" class="btn btn-ghost" id="int-browse-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="int-browse-use" disabled>Use this path</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var AJAX_URL  = 'module.php?module=8core-integrity&page=module_integrity';
+  var csrfToken = document.querySelector('input[name="csrf_token"]')
+                  ? document.querySelector('input[name="csrf_token"]').value : '';
+
+  // ── Elements ──────────────────────────────────────────────────────────────
+  var modal        = document.getElementById('int-browse-modal');
+  var browseBtn    = document.getElementById('int-browse-btn');
+  var closeBtn     = document.getElementById('int-browse-close');
+  var cancelBtn    = document.getElementById('int-browse-cancel');
+  var useBtn       = document.getElementById('int-browse-use');
+  var bodyEl       = document.getElementById('int-browse-body');
+  var breadEl      = document.getElementById('int-breadcrumb');
+  var curPathEl    = document.getElementById('int-modal-current-path');
+  var destInput    = document.getElementById('int-dest-path');
+  var detectBox    = document.getElementById('int-detect-box');
+  var detectLoad   = document.getElementById('int-detect-loading');
+  var detectResult = document.getElementById('int-detect-result');
+  var detSoftware  = document.getElementById('int-det-software');
+  var detVersion   = document.getElementById('int-det-version');
+  var detRoot      = document.getElementById('int-det-root');
+  var detWarning   = document.getElementById('int-detect-warning');
+
+  var selectedPath = '';
+
+  // ── AJAX helper ───────────────────────────────────────────────────────────
+  function post(action, data, cb) {
+    var fd = new FormData();
+    fd.append('action', action);
+    fd.append('csrf_token', csrfToken);
+    for (var k in data) fd.append(k, data[k]);
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', AJAX_URL);
+    xhr.onload = function () {
+      try { cb(null, JSON.parse(xhr.responseText)); }
+      catch(e) { cb('Invalid response'); }
+    };
+    xhr.onerror = function () { cb('Network error'); };
+    xhr.send(fd);
+  }
+
+  // ── Breadcrumb ────────────────────────────────────────────────────────────
+  function renderBreadcrumb(path) {
+    var parts = path.replace(/^\/home/, '').split('/').filter(Boolean);
+    var html  = '<span class="int-bc-seg int-bc-link" data-path="/home">/home</span>';
+    var accum = '/home';
+    for (var i = 0; i < parts.length; i++) {
+      accum += '/' + parts[i];
+      var p   = accum; // closure capture
+      html   += '<span class="int-bc-sep">&#8250;</span>'
+              + '<span class="int-bc-seg int-bc-link" data-path="' + escHtml(p) + '">' + escHtml(parts[i]) + '</span>';
+    }
+    breadEl.innerHTML = html;
+    breadEl.querySelectorAll('.int-bc-link').forEach(function (el) {
+      el.addEventListener('click', function () { loadDir(this.dataset.path); });
+    });
+  }
+
+  // ── Load directory ────────────────────────────────────────────────────────
+  function loadDir(path) {
+    bodyEl.innerHTML = '<div class="int-browse-loading">Loading&hellip;</div>';
+    selectedPath = path;
+    curPathEl.textContent = path;
+    useBtn.disabled = false;
+    renderBreadcrumb(path);
+
+    post('browse_dir', { path: path }, function (err, data) {
+      if (err || !data.ok) {
+        bodyEl.innerHTML = '<div class="int-browse-error">'
+          + escHtml(err || data.error || 'Error') + '</div>';
+        return;
+      }
+      if (data.entries.length === 0) {
+        bodyEl.innerHTML = '<div class="int-browse-empty">No subdirectories.</div>';
+        return;
+      }
+      var html = '<ul class="int-dir-list">';
+      data.entries.forEach(function (e) {
+        html += '<li class="int-dir-item" data-path="' + escHtml(e.path) + '">'
+              + '<span class="int-dir-icon">' + (e.has_children ? '&#9654;' : '&#9723;') + '</span>'
+              + '<span class="int-dir-name">' + escHtml(e.name) + '</span>'
+              + '</li>';
+      });
+      html += '</ul>';
+      bodyEl.innerHTML = html;
+      bodyEl.querySelectorAll('.int-dir-item').forEach(function (li) {
+        li.addEventListener('click', function () {
+          bodyEl.querySelectorAll('.int-dir-item').forEach(function (x) { x.classList.remove('is-selected'); });
+          li.classList.add('is-selected');
+          selectedPath     = li.dataset.path;
+          curPathEl.textContent = selectedPath;
+          useBtn.disabled  = false;
+        });
+        li.addEventListener('dblclick', function () {
+          loadDir(li.dataset.path);
+        });
+      });
+    });
+  }
+
+  // ── Open / close modal ────────────────────────────────────────────────────
+  function openModal() {
+    var start = (destInput.value.trim() || '/home');
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    loadDir(start);
+  }
+
+  function closeModal() {
+    modal.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+
+  browseBtn.addEventListener('click', openModal);
+  closeBtn.addEventListener('click', closeModal);
+  cancelBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', function (e) { if (e.target === modal) closeModal(); });
+
+  // ── Use this path ─────────────────────────────────────────────────────────
+  useBtn.addEventListener('click', function () {
+    if (!selectedPath) return;
+    destInput.value = selectedPath;
+    closeModal();
+    detectSoftware(selectedPath);
+  });
+
+  // ── Software detection ────────────────────────────────────────────────────
+  var detectTimer = null;
+  function detectSoftware(path) {
+    if (!path) { detectBox.style.display = 'none'; return; }
+    detectBox.style.display    = 'block';
+    detectLoad.style.display   = 'flex';
+    detectResult.style.display = 'none';
+
+    post('detect_software', { path: path }, function (err, data) {
+      detectLoad.style.display   = 'none';
+      detectResult.style.display = 'block';
+      if (err) {
+        detSoftware.textContent = 'Error';
+        detVersion.textContent  = '—';
+        detRoot.textContent     = path;
+        detWarning.style.display = 'block';
+        return;
+      }
+      detSoftware.textContent = data.software || 'Unknown';
+      detVersion.textContent  = data.version  || 'unknown';
+      detRoot.textContent     = data.root     || path;
+      detWarning.style.display = (data.software === 'Unknown') ? 'block' : 'none';
+    });
+  }
+
+  // Also trigger detection when user manually types into dest field
+  destInput.addEventListener('input', function () {
+    clearTimeout(detectTimer);
+    var v = this.value.trim();
+    if (!v) { detectBox.style.display = 'none'; return; }
+    detectTimer = setTimeout(function () { detectSoftware(v); }, 600);
+  });
+
+  // Re-trigger on page load if field already has a value (e.g. after POST error)
+  if (destInput.value.trim()) detectSoftware(destInput.value.trim());
+
+  // ── Keyboard: Escape closes modal ─────────────────────────────────────────
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && modal.style.display !== 'none') closeModal();
+  });
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+})();
+</script>
 </body>
 </html>

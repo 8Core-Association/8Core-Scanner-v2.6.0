@@ -281,3 +281,196 @@ function integrity_zip_extract(string $zipPath, string $targetDir, ?string $wrap
     $zip->close();
     return ['ok' => true, 'error' => ''];
 }
+
+// ── Path browser (security-constrained to /home) ───────────────────────────────
+
+/**
+ * Resolves a browser path safely. Returns canonical path or null if disallowed.
+ * Rules: must resolve under /home, no symlinks escaping /home.
+ */
+function integrity_browser_resolve(string $path): ?string
+{
+    $path = rtrim($path, '/');
+    if ($path === '') $path = '/home';
+
+    // Reject before realpath if obvious traversal
+    if (str_contains($path, "\0")) return null;
+
+    $real = realpath($path);
+    if ($real === false) return null;
+
+    // Must stay inside /home
+    if ($real !== '/home' && !str_starts_with($real, '/home/')) return null;
+
+    // Must be a directory
+    if (!is_dir($real)) return null;
+
+    return $real;
+}
+
+/**
+ * Lists immediate subdirectories of a path, constrained to /home.
+ * Returns ['ok' => bool, 'path' => string, 'entries' => [...], 'error' => string].
+ * Each entry: ['name' => string, 'path' => string, 'has_children' => bool].
+ */
+function integrity_browse_dir(string $requestedPath): array
+{
+    $resolved = integrity_browser_resolve($requestedPath);
+    if ($resolved === null) {
+        return ['ok' => false, 'path' => '', 'entries' => [], 'error' => 'Path is not allowed. Must be inside /home.'];
+    }
+
+    $entries = [];
+    $scan    = @scandir($resolved);
+    if ($scan === false) {
+        return ['ok' => false, 'path' => $resolved, 'entries' => [], 'error' => 'Cannot read directory (permission denied).'];
+    }
+
+    foreach ($scan as $name) {
+        if ($name === '.' || $name === '..') continue;
+        $fullPath = $resolved . '/' . $name;
+
+        // Only directories; skip symlinks that point outside /home
+        if (!is_dir($fullPath)) continue;
+        $realSub = realpath($fullPath);
+        if ($realSub === false) continue;
+        if ($realSub !== '/home' && !str_starts_with($realSub, '/home/')) continue;
+
+        // Does it have any subdirectories?
+        $hasChildren = false;
+        $subScan     = @scandir($fullPath);
+        if ($subScan) {
+            foreach ($subScan as $sub) {
+                if ($sub === '.' || $sub === '..') continue;
+                if (is_dir($fullPath . '/' . $sub)) { $hasChildren = true; break; }
+            }
+        }
+
+        $entries[] = ['name' => $name, 'path' => $realSub, 'has_children' => $hasChildren];
+    }
+
+    usort($entries, fn($a, $b) => strcmp($a['name'], $b['name']));
+
+    return ['ok' => true, 'path' => $resolved, 'entries' => $entries, 'error' => ''];
+}
+
+// ── Software / version detector ────────────────────────────────────────────────
+
+/**
+ * Detects CMS/software installed at $path.
+ * Returns ['software' => string, 'version' => string, 'root' => string].
+ * 'software' is one of: Joomla, WordPress, WHMCS, PrestaShop, phpBB, Dolibarr, Unknown.
+ * 'version' is the detected version string or 'unknown'.
+ */
+function integrity_detect_software(string $path): array
+{
+    $real = integrity_browser_resolve($path);
+    if ($real === null) {
+        return ['software' => 'Unknown', 'version' => 'unknown', 'root' => $path, 'error' => 'Path not accessible.'];
+    }
+
+    // ── Joomla ────────────────────────────────────────────────────────────────
+    if (
+        is_file($real . '/configuration.php') &&
+        is_file($real . '/administrator/manifests/files/joomla.xml')
+    ) {
+        $version = _int_read_xml_version($real . '/administrator/manifests/files/joomla.xml');
+        return ['software' => 'Joomla', 'version' => $version, 'root' => $real, 'error' => ''];
+    }
+
+    // ── WordPress ─────────────────────────────────────────────────────────────
+    if (
+        is_file($real . '/wp-config.php') &&
+        is_file($real . '/wp-includes/version.php')
+    ) {
+        $version = _int_read_wp_version($real . '/wp-includes/version.php');
+        return ['software' => 'WordPress', 'version' => $version, 'root' => $real, 'error' => ''];
+    }
+
+    // ── WHMCS ─────────────────────────────────────────────────────────────────
+    if (
+        is_file($real . '/configuration.php') &&
+        (
+            is_dir($real . '/vendor/whmcs') ||
+            is_file($real . '/vendor/whmcs/whmcs-foundation/lib/Version/SemanticVersion.php')
+        )
+    ) {
+        return ['software' => 'WHMCS', 'version' => 'unknown', 'root' => $real, 'error' => ''];
+    }
+
+    // ── PrestaShop ────────────────────────────────────────────────────────────
+    $psAutoload = is_file($real . '/classes/PrestaShopAutoload.php');
+    if ($psAutoload) {
+        $version = 'unknown';
+        if (is_file($real . '/app/config/parameters.php')) {
+            // modern PS
+        } elseif (is_file($real . '/config/settings.inc.php')) {
+            $version = _int_read_ps_version($real . '/config/settings.inc.php');
+        }
+        return ['software' => 'PrestaShop', 'version' => $version, 'root' => $real, 'error' => ''];
+    }
+
+    // ── phpBB ─────────────────────────────────────────────────────────────────
+    if (
+        is_file($real . '/config.php') &&
+        is_file($real . '/includes/constants.php') &&
+        is_dir($real . '/phpbb')
+    ) {
+        $version = _int_read_phpbb_version($real . '/includes/constants.php');
+        return ['software' => 'phpBB', 'version' => $version, 'root' => $real, 'error' => ''];
+    }
+
+    // ── Dolibarr ──────────────────────────────────────────────────────────────
+    // Path might be /htdocs or the parent
+    if (is_file($real . '/htdocs/main.inc.php') && is_file($real . '/htdocs/conf/conf.php')) {
+        return ['software' => 'Dolibarr', 'version' => 'unknown', 'root' => $real, 'error' => ''];
+    }
+    if (is_file($real . '/main.inc.php') && is_file($real . '/conf/conf.php')) {
+        return ['software' => 'Dolibarr', 'version' => 'unknown', 'root' => $real, 'error' => ''];
+    }
+
+    return ['software' => 'Unknown', 'version' => 'unknown', 'root' => $real, 'error' => ''];
+}
+
+// ── Detector helpers ──────────────────────────────────────────────────────────
+
+function _int_read_xml_version(string $file): string
+{
+    $content = @file_get_contents($file, false, null, 0, 8192);
+    if ($content === false) return 'unknown';
+    if (preg_match('/<version>\s*([^<\s]+)\s*<\/version>/i', $content, $m)) {
+        return trim($m[1]);
+    }
+    return 'unknown';
+}
+
+function _int_read_wp_version(string $file): string
+{
+    $content = @file_get_contents($file, false, null, 0, 4096);
+    if ($content === false) return 'unknown';
+    if (preg_match('/\$wp_version\s*=\s*[\'"]([^\'"]+)[\'"]/i', $content, $m)) {
+        return trim($m[1]);
+    }
+    return 'unknown';
+}
+
+function _int_read_ps_version(string $file): string
+{
+    $content = @file_get_contents($file, false, null, 0, 4096);
+    if ($content === false) return 'unknown';
+    if (preg_match("/define\s*\(\s*'_PS_VERSION_'\s*,\s*'([^']+)'/i", $content, $m)) {
+        return trim($m[1]);
+    }
+    return 'unknown';
+}
+
+function _int_read_phpbb_version(string $file): string
+{
+    $content = @file_get_contents($file, false, null, 0, 8192);
+    if ($content === false) return 'unknown';
+    if (preg_match("/define\s*\(\s*'PHPBB_VERSION'\s*,\s*'([^']+)'/i", $content, $m)) {
+        return trim($m[1]);
+    }
+    return 'unknown';
+}
+

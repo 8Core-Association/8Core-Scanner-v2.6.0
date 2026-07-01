@@ -1,5 +1,22 @@
 # 8Core Integrity — Changelog
 
+## [0.3.0] — 2026-07-01
+
+### Added
+
+- `includes/integrity.php` — `integrity_browse_dir(string $path): array` — secure directory browser constrained to `/home`; blocks path traversal, symlinks escaping `/home`, non-directory entries
+- `includes/integrity.php` — `integrity_browser_resolve(string $path): ?string` — canonical path resolver with `/home` guard
+- `includes/integrity.php` — `integrity_detect_software(string $path): array` — detects Joomla, WordPress, WHMCS, PrestaShop, phpBB, Dolibarr from filesystem markers; returns software name, version, root
+- `includes/integrity.php` — version reader helpers: `_int_read_xml_version`, `_int_read_wp_version`, `_int_read_ps_version`, `_int_read_phpbb_version`
+- `admin/module_integrity.php` — AJAX POST handlers: `browse_dir`, `detect_software` (JSON responses, auth-gated)
+- `admin/module_integrity.php` — **Browse /home** modal in Integrity Check → Destination field: tree-navigable, breadcrumb, double-click to enter, single-click to select, "Use this path" sets destination
+- `admin/module_integrity.php` — **Software detection info box**: auto-triggers after path selection (or 600 ms after manual input); shows Detected software, version, root; warning if unknown
+
+### Changed
+
+- `admin/module_integrity.php` — Destination field replaced with `<input> + Browse button` row
+- `module.php` — version bumped to `0.3.0`
+
 ## [0.1.2] — 2026-07-01
 
 ### Changed
