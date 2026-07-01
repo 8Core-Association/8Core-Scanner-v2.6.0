@@ -514,6 +514,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     _int_flash_set('ok', 'Moved to Integrity Trash: ' . $row['relative_path']);
                 } else {
                     integrity_update_result_status($pdo, $runId, $resultId, 'failed', $tr['error']);
+                    $_SESSION['8int_fail_detail'][$resultId] = [
+                        'error'    => $tr['error'],
+                        'root_cmd' => $tr['root_cmd'] ?? '',
+                    ];
                     _int_flash_set('err', 'Trash failed: ' . $tr['error']);
                 }
             } elseif ($action === 'replace') {
@@ -539,6 +543,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif ($action === 'mark_reviewed') {
                 integrity_update_result_status($pdo, $runId, $resultId, 'reviewed');
                 _int_flash_set('ok', 'Marked as reviewed: ' . $row['relative_path']);
+            } elseif ($action === 'reset_status') {
+                // Reset failed/reviewed rows back to 'new' for retry
+                if (in_array($row['status'], ['failed', 'reviewed'], true)) {
+                    integrity_update_result_status($pdo, $runId, $resultId, 'new', '');
+                    unset($_SESSION['8int_fail_detail'][$resultId]);
+                    _int_flash_set('ok', 'Reset to new: ' . $row['relative_path']);
+                } else {
+                    _int_flash_set('err', 'Only failed or reviewed rows can be reset.');
+                }
             }
         }
         header('Location: ' . _int_build_check_url($runId, $filters));
@@ -797,6 +810,10 @@ foreach ($_intExtraApps as $ea) {
 foreach (_int_flash_drain() as $fm) {
     $_intMessages[] = $fm;
 }
+
+// Drain per-result failure details (set by failed trash/replace actions)
+$_intFailDetails = $_SESSION['8int_fail_detail'] ?? [];
+// Do NOT unset here — keep until reset so View error survives filter navigation
 
 // In-memory result fallback (no DB)
 if (isset($_GET['inmem']) && isset($_SESSION['8int_inmem'])) {
@@ -1107,6 +1124,13 @@ require __DIR__ . '/../../../includes/version.php';
 
 /* ── MODIFIED_FILE row highlight ── */
 .int-results-table tr.type-modified td { background:rgba(220,38,38,.06); }
+
+/* ── Failed row detail panel ── */
+.int-fail-detail { margin-top:4px; font-size:11px; }
+.int-fail-msg    { color:#dc2626; font-family:var(--font-mono,monospace); word-break:break-all; }
+.int-fail-rootcmd { margin-top:5px; background:#fffbeb; border:1px solid #fde68a; border-radius:5px; padding:6px 10px; }
+.int-fail-rootcmd-label { font-size:10px; font-weight:700; color:#92400e; margin-bottom:4px; }
+.int-fail-rootcmd pre { margin:0; font-family:var(--font-mono,monospace); font-size:11px; color:#166534; background:#dcfce7; border-radius:4px; padding:6px 8px; white-space:pre-wrap; word-break:break-all; line-height:1.55; }
 
 /* ── Summary counters in run bar ── */
 .int-summary-counters { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:3px; }
@@ -1928,7 +1952,13 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                   $isExtra     = str_starts_with($r['type'], 'EXTRA_');
                   $isMissing   = str_starts_with($r['type'], 'MISSING_');
                   $isModified  = $r['type'] === 'MODIFIED_FILE';
+                  $isFailed    = $r['status'] === 'failed';
+                  $isReviewed  = $r['status'] === 'reviewed';
                   $__trClass   = 'sev-' . h($r['severity']) . ($isActioned ? ' is-actioned' : '') . ($isModified ? ' type-modified' : '');
+                  // Failure detail: from session (fresh) or from DB note
+                  $__failDetail = $_intFailDetails[(int)$r['id']] ?? null;
+                  $__failError  = $__failDetail['error'] ?? ($isFailed ? $r['note'] : '');
+                  $__failRootCmd = $__failDetail['root_cmd'] ?? '';
                 ?>
                 <tr class="<?= $__trClass ?>">
                   <td>
@@ -1970,6 +2000,17 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                     <span class="int-status-badge <?= h($r['status']) ?>"><?= h(str_replace('_', ' ', $r['status'])) ?></span>
                     <?php if ($r['note'] && $r['status'] === 'trashed'): ?>
                     <div style="font-size:10px;color:var(--text-muted);margin-top:2px;word-break:break-all;"><?= h($r['note']) ?></div>
+                    <?php endif; ?>
+                    <?php if ($isFailed && $__failError): ?>
+                    <div class="int-fail-detail">
+                      <div class="int-fail-msg"><?= h($__failError) ?></div>
+                      <?php if ($__failRootCmd): ?>
+                      <div class="int-fail-rootcmd">
+                        <div class="int-fail-rootcmd-label">Root command to execute manually:</div>
+                        <pre><?= h(str_replace('{webuser}', 'www-data', $__failRootCmd)) ?></pre>
+                      </div>
+                      <?php endif; ?>
+                    </div>
                     <?php endif; ?>
                   </td>
                   <td>
@@ -2058,7 +2099,70 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                       </form>
                     </div>
                     <?php else: ?>
+                    <?php if ($isFailed): ?>
+                    <!-- Failed row: Retry (re-run original action) + Reset to new -->
+                    <div class="int-row-actions">
+                      <?php
+                        // Determine what action to retry based on type
+                        $__retryAction = null;
+                        $__retryLabel  = null;
+                        if ($isExtra) { $__retryAction = 'trash';   $__retryLabel = 'Retry Trash'; }
+                        elseif ($isMissing)  { $__retryAction = 'replace'; $__retryLabel = 'Retry Replace'; }
+                        elseif ($isModified) { $__retryAction = 'replace'; $__retryLabel = 'Retry Replace'; }
+                        if ($__retryAction):
+                      ?>
+                      <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
+                        <input type="hidden" name="action"        value="action_result">
+                        <input type="hidden" name="run_id"        value="<?= (int)$_intRunId ?>">
+                        <input type="hidden" name="result_id"     value="<?= (int)$r['id'] ?>">
+                        <input type="hidden" name="result_action" value="<?= h($__retryAction) ?>">
+                        <?php foreach (_int_filters_to_get($_intRunFilters) as $fk => $fv): ?>
+                        <input type="hidden" name="<?= h($fk) ?>" value="<?= h($fv) ?>">
+                        <?php endforeach; ?>
+                        <?= csrf_field() ?>
+                        <button type="submit" class="int-btn-act <?= $isExtra ? 'act-trash' : 'act-replace' ?>"
+                                style="font-size:10px;padding:2px 7px;">
+                          <?= h($__retryLabel) ?>
+                        </button>
+                      </form>
+                      <?php endif; ?>
+                      <!-- Reset to new -->
+                      <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
+                        <input type="hidden" name="action"        value="action_result">
+                        <input type="hidden" name="run_id"        value="<?= (int)$_intRunId ?>">
+                        <input type="hidden" name="result_id"     value="<?= (int)$r['id'] ?>">
+                        <input type="hidden" name="result_action" value="reset_status">
+                        <?php foreach (_int_filters_to_get($_intRunFilters) as $fk => $fv): ?>
+                        <input type="hidden" name="<?= h($fk) ?>" value="<?= h($fv) ?>">
+                        <?php endforeach; ?>
+                        <?= csrf_field() ?>
+                        <button type="submit" class="int-btn-act" style="font-size:10px;padding:2px 7px;"
+                                title="Reset status to new so this row can be actioned again.">
+                          Reset
+                        </button>
+                      </form>
+                    </div>
+                    <?php elseif ($isReviewed): ?>
+                    <!-- Reviewed: allow reset only -->
+                    <div class="int-row-actions">
+                      <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
+                        <input type="hidden" name="action"        value="action_result">
+                        <input type="hidden" name="run_id"        value="<?= (int)$_intRunId ?>">
+                        <input type="hidden" name="result_id"     value="<?= (int)$r['id'] ?>">
+                        <input type="hidden" name="result_action" value="reset_status">
+                        <?php foreach (_int_filters_to_get($_intRunFilters) as $fk => $fv): ?>
+                        <input type="hidden" name="<?= h($fk) ?>" value="<?= h($fv) ?>">
+                        <?php endforeach; ?>
+                        <?= csrf_field() ?>
+                        <button type="submit" class="int-btn-act" style="font-size:10px;padding:2px 7px;"
+                                title="Reset status back to new.">
+                          Reset
+                        </button>
+                      </form>
+                    </div>
+                    <?php else: ?>
                     <span style="font-size:11px;color:var(--text-muted);">—</span>
+                    <?php endif; ?>
                     <?php endif; ?>
                   </td>
                 </tr>
@@ -2365,6 +2469,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
 (function () {
   'use strict';
 
+  var cbAll       = document.getElementById('int-cb-all');
   var selAll      = document.getElementById('int-sel-all');
   var selNone     = document.getElementById('int-sel-none');
   var selCount    = document.getElementById('int-sel-count');
@@ -2373,6 +2478,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   var selectMode  = document.getElementById('int-select-mode');
   var idRangeGrp  = document.getElementById('int-id-range-group');
   var idRangeInp  = document.getElementById('int-id-range');
+  var bulkForm    = document.getElementById('int-bulk-form');
 
   if (!bulkApply) return; // no results on page
 
@@ -2382,19 +2488,30 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
 
   function updateCount() {
     var n = getCheckboxes().filter(function(c) { return c.checked; }).length;
+    var total = getCheckboxes().length;
     if (selCount) selCount.innerHTML = '<strong>' + n + '</strong> selected';
+    // Sync header checkbox state
+    if (cbAll) {
+      cbAll.checked       = (n > 0 && n === total);
+      cbAll.indeterminate = (n > 0 && n < total);
+    }
     updateApplyState();
   }
 
   function updateApplyState() {
-    var hasAction = bulkAction && bulkAction.value !== '';
-    var isRange   = selectMode && selectMode.value === 'range';
-    var hasRange  = idRangeInp && idRangeInp.value.trim() !== '';
+    var hasAction  = bulkAction && bulkAction.value !== '';
+    var isRange    = selectMode && selectMode.value === 'range';
+    var hasRange   = idRangeInp && idRangeInp.value.trim() !== '';
     var hasChecked = getCheckboxes().some(function(c) { return c.checked; });
-
-    var canApply  = hasAction && (isRange ? hasRange : hasChecked);
+    var canApply   = hasAction && (isRange ? hasRange : hasChecked);
     if (bulkApply) bulkApply.disabled = !canApply;
   }
+
+  // Header checkbox toggles all rows
+  if (cbAll) cbAll.addEventListener('change', function () {
+    getCheckboxes().forEach(function(c) { c.checked = cbAll.checked; });
+    updateCount();
+  });
 
   if (selAll) selAll.addEventListener('click', function () {
     getCheckboxes().forEach(function(c) { c.checked = true; });
@@ -2419,6 +2536,24 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   });
 
   if (idRangeInp) idRangeInp.addEventListener('input', updateApplyState);
+
+  // Guard: block submit if no rows checked and mode is 'checked'
+  if (bulkForm) bulkForm.addEventListener('submit', function (e) {
+    var isRange = selectMode && selectMode.value === 'range';
+    if (!isRange) {
+      var n = getCheckboxes().filter(function(c) { return c.checked; }).length;
+      if (n === 0) {
+        e.preventDefault();
+        alert('No rows selected.');
+        return false;
+      }
+    }
+    if (!bulkAction || bulkAction.value === '') {
+      e.preventDefault();
+      alert('Select a bulk action first.');
+      return false;
+    }
+  });
 
   updateCount();
 })();

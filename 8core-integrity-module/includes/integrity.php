@@ -1049,41 +1049,89 @@ function integrity_trash_root(): string {
  * Trash path: /home/8core_integrity/trash/YYYYMMDD-HHMMSS/<relative_path>
  * Safety: fullPath must be under /home and must match destRoot + / + relativePath.
  *
- * Returns ['ok' => bool, 'error' => string, 'trash_path' => string].
+ * Returns ['ok' => bool, 'error' => string, 'trash_path' => string, 'root_cmd' => string].
  */
 function integrity_do_trash_path(string $fullPath, string $destRoot, string $relativePath): array {
+    $empty = ['ok' => false, 'error' => '', 'trash_path' => '', 'root_cmd' => ''];
+
     $relativePath = ltrim($relativePath, '/');
     if ($relativePath === '' || str_contains($relativePath, '..')) {
-        return ['ok' => false, 'error' => 'Invalid relative path.', 'trash_path' => ''];
+        return array_merge($empty, ['error' => 'Invalid relative path.']);
     }
 
-    // Safety: path must be inside /home
+    // Safety: path must exist and be inside /home
     $real = realpath($fullPath);
     if ($real === false) {
-        return ['ok' => false, 'error' => 'Path does not exist: ' . $fullPath, 'trash_path' => ''];
+        // Check if the path simply doesn't exist vs permission denied
+        $errMsg = file_exists($fullPath)
+            ? 'Permission denied reading path: ' . $fullPath
+            : 'Source path does not exist: ' . $fullPath;
+        return array_merge($empty, ['error' => $errMsg]);
     }
     if ($real !== '/home' && !str_starts_with($real, '/home/')) {
-        return ['ok' => false, 'error' => 'Path is not inside /home.', 'trash_path' => ''];
-    }
-    // Must match expected destination root
-    $expectedBase = rtrim(realpath($destRoot) ?: $destRoot, '/') . '/' . $relativePath;
-    if ($real !== realpath($expectedBase) && $real !== $expectedBase) {
-        return ['ok' => false, 'error' => 'Path does not match expected destination.', 'trash_path' => ''];
+        return array_merge($empty, ['error' => 'Path is not inside /home: ' . $real]);
     }
 
-    $trashDir  = integrity_trash_root() . '/' . date('Ymd-His');
-    $trashDest = $trashDir . '/' . $relativePath;
+    // Prevent trashing the destination root itself
+    $realDestRoot = rtrim(realpath($destRoot) ?: $destRoot, '/');
+    if ($real === $realDestRoot) {
+        return array_merge($empty, ['error' => 'Refusing to trash the destination root itself.']);
+    }
+
+    // Must match expected destination root + relative_path
+    $expectedBase = $realDestRoot . '/' . $relativePath;
+    $realExpected = realpath($expectedBase);
+    if ($real !== $realExpected && $real !== $expectedBase) {
+        return array_merge($empty, ['error' => 'Path does not match expected destination (' . $expectedBase . ').']);
+    }
+
+    // Must be inside destination root
+    if (!str_starts_with($real, $realDestRoot . '/')) {
+        return array_merge($empty, ['error' => 'Source path escapes destination root.']);
+    }
+
+    $trashTs     = date('Ymd-His');
+    $trashDir    = integrity_trash_root() . '/' . $trashTs;
+    $trashDest   = $trashDir . '/' . $relativePath;
     $trashParent = dirname($trashDest);
 
+    // Pre-flight: check if trash root parent exists/is writable
+    $trashRoot = integrity_trash_root();
+    if (!is_dir($trashRoot)) {
+        // Try to create it
+        if (!@mkdir($trashRoot, 0755, true)) {
+            $err = error_get_last();
+            $msg = 'Cannot create trash root "' . $trashRoot . '": ' . ($err['message'] ?? 'permission denied');
+            $rootCmd = 'mkdir -p ' . escapeshellarg($trashRoot) . "\n"
+                     . 'chown -R {webuser}:{webuser} ' . escapeshellarg(dirname($trashRoot));
+            return array_merge($empty, ['error' => $msg, 'root_cmd' => $rootCmd]);
+        }
+    }
+
     if (!is_dir($trashParent) && !@mkdir($trashParent, 0755, true)) {
-        return ['ok' => false, 'error' => 'Cannot create trash directory.', 'trash_path' => ''];
+        $err = error_get_last();
+        $msg = 'Cannot create trash directory "' . $trashParent . '": ' . ($err['message'] ?? 'permission denied');
+        $rootCmd = 'mkdir -p ' . escapeshellarg($trashParent);
+        return array_merge($empty, ['error' => $msg, 'root_cmd' => $rootCmd]);
     }
 
     if (!@rename($real, $trashDest)) {
-        return ['ok' => false, 'error' => 'rename() failed. Check permissions.', 'trash_path' => ''];
+        $err    = error_get_last();
+        $errMsg = $err['message'] ?? 'rename() failed';
+        // Diagnose: is source readable? Is trash parent writable?
+        $details = [];
+        if (!is_readable($real))                $details[] = 'source not readable';
+        if (!is_writable(dirname($real)))       $details[] = 'source parent not writable';
+        if (!is_writable($trashParent))         $details[] = 'trash destination not writable';
+        if (!empty($details))                   $errMsg .= ' (' . implode('; ', $details) . ')';
+
+        $rootCmd = 'mkdir -p ' . escapeshellarg($trashParent) . "\n"
+                 . 'mv ' . escapeshellarg($real) . ' ' . escapeshellarg($trashDest) . "\n"
+                 . 'chown -R {webuser}:{webuser} ' . escapeshellarg($trashDir);
+        return array_merge($empty, ['error' => $errMsg, 'root_cmd' => $rootCmd]);
     }
 
-    return ['ok' => true, 'error' => '', 'trash_path' => $trashDest];
+    return ['ok' => true, 'error' => '', 'trash_path' => $trashDest, 'root_cmd' => ''];
 }
 
 /**

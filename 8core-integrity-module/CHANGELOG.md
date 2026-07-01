@@ -1,6 +1,19 @@
 # 8Core Integrity — Changelog
 
-## [0.8.0] — 2026-07-01
+## [0.8.1] — 2026-07-01
+
+### Fixed
+
+- `admin/module_integrity.php` — Header checkbox (`#int-cb-all`) is now wired to toggle all visible row checkboxes; supports indeterminate state when partially selected
+- `admin/module_integrity.php` — Check all / Uncheck all buttons correctly update the header checkbox indeterminate/checked state
+- `admin/module_integrity.php` — Bulk Apply button is blocked with a JS alert if no rows are selected and mode is "checked"
+- `admin/module_integrity.php` — Failed result rows now display the error message inline in the Status column; if a root command is available it is shown in a collapsible block
+- `admin/module_integrity.php` — Failed result rows now have action buttons: **Retry** (re-runs the original action) and **Reset** (resets status to `new` so the row can be actioned again)
+- `admin/module_integrity.php` — Reviewed result rows show a **Reset** button to return status to `new`
+- `admin/module_integrity.php` — `reset_status` action added to `action_result` handler; allowed for `failed` and `reviewed` rows
+- `includes/integrity.php` — `integrity_do_trash_path()` now returns detailed error messages: distinguishes source-not-exist vs. permission denied, identifies non-writable source parent and non-writable trash destination; returns `root_cmd` with concrete `mkdir`/`mv`/`chown` commands for manual fallback; validates that source does not equal destination root; validates that source is strictly inside destination root
+
+
 
 ### Added
 
