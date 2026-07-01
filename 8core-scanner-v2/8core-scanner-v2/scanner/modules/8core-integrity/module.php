@@ -8,7 +8,7 @@
 return [
     'module_key'  => '8core-integrity',
     'name'        => '8Core Integrity',
-    'version'     => '0.1.1',
+    'version'     => '0.2.0',
     'description' => 'Core and file integrity checker using trusted repository comparison.',
     'admin_menu'  => [
         'label' => 'Integrity',
