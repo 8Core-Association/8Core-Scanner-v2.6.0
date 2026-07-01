@@ -555,6 +555,41 @@ function integrity_ensure_tables(PDO $pdo): bool {
             $pdo->exec("ALTER TABLE `scanner_integrity_runs` ADD COLUMN `scan_exclusions` TEXT NULL AFTER `info`");
         } catch (PDOException $e) { /* column already exists */ }
 
+        // Hash-related columns added in v0.8.0
+        foreach ([
+            "ALTER TABLE `scanner_integrity_results` ADD COLUMN `repo_sha256`        CHAR(64) NULL AFTER `full_path`",
+            "ALTER TABLE `scanner_integrity_results` ADD COLUMN `destination_sha256` CHAR(64) NULL AFTER `repo_sha256`",
+            "ALTER TABLE `scanner_integrity_results` ADD COLUMN `repo_size`          BIGINT   NULL AFTER `destination_sha256`",
+            "ALTER TABLE `scanner_integrity_results` ADD COLUMN `destination_size`   BIGINT   NULL AFTER `repo_size`",
+            "ALTER TABLE `scanner_integrity_runs`    ADD COLUMN `check_mode`         VARCHAR(20) NOT NULL DEFAULT 'structural' AFTER `software`",
+            "ALTER TABLE `scanner_integrity_runs`    ADD COLUMN `summary_json`       TEXT NULL AFTER `scan_exclusions`",
+        ] as $sql) {
+            try { $pdo->exec($sql); } catch (PDOException $e) { /* column already exists */ }
+        }
+
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS `scanner_integrity_repo_files` (
+               `id`            INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+               `repo_key`      VARCHAR(255)  NOT NULL,
+               `application`   VARCHAR(100)  NOT NULL,
+               `branch`        VARCHAR(100)  NOT NULL,
+               `version`       VARCHAR(100)  NOT NULL,
+               `repo_path`     VARCHAR(1024) NOT NULL,
+               `relative_path` VARCHAR(1024) NOT NULL,
+               `file_type`     VARCHAR(20)   NOT NULL DEFAULT \'file\',
+               `sha256`        CHAR(64)      NULL,
+               `size_bytes`    BIGINT        NULL,
+               `mtime`         INT           NULL,
+               `created_at`    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               `updated_at`    DATETIME      NULL ON UPDATE CURRENT_TIMESTAMP,
+               PRIMARY KEY (`id`),
+               KEY `idx_repo_key`       (`repo_key`),
+               KEY `idx_app_branch_ver` (`application`, `branch`, `version`),
+               KEY `idx_relative_path`  (`relative_path`(100)),
+               KEY `idx_sha256`         (`sha256`)
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+
         return true;
     } catch (PDOException $e) {
         return false;
@@ -842,6 +877,8 @@ function integrity_structural_check(
         'dest'      => $realDest,
         'truncated' => $truncated,
         'counts'    => $counts,
+        'mode'      => 'structural',
+        'summary'   => [],
     ];
 }
 
@@ -850,23 +887,28 @@ function integrity_structural_check(
 /**
  * Saves a structural check run to DB. Returns run_id on success, 0 on error.
  * $scanExclusions: array of normalized exclusion strings (trailing-slash prefix form).
+ * $checkMode: 'hash' or 'structural'.
+ * $summary: optional extended counters (checked_files, ok_files, modified_files, etc.).
  */
-function integrity_save_run(PDO $pdo, string $origin, string $dest, string $software, array $counts, array $scanExclusions = []): int {
+function integrity_save_run(PDO $pdo, string $origin, string $dest, string $software, array $counts, array $scanExclusions = [], string $checkMode = 'structural', array $summary = []): int {
     try {
         $stmt = $pdo->prepare(
             'INSERT INTO scanner_integrity_runs
-               (origin_path, destination_path, software, total, suspicious, warnings, info, scan_exclusions, created_at)
-             VALUES (:o, :d, :s, :total, :susp, :warn, :info, :excl, NOW())'
+               (origin_path, destination_path, software, check_mode, total, suspicious, warnings, info,
+                scan_exclusions, summary_json, created_at)
+             VALUES (:o, :d, :s, :mode, :total, :susp, :warn, :info, :excl, :sumj, NOW())'
         );
         $stmt->execute([
             ':o'     => $origin,
             ':d'     => $dest,
             ':s'     => $software ?: null,
+            ':mode'  => $checkMode,
             ':total' => ($counts['suspicious'] ?? 0) + ($counts['warning'] ?? 0) + ($counts['info'] ?? 0),
             ':susp'  => $counts['suspicious'] ?? 0,
             ':warn'  => $counts['warning']    ?? 0,
             ':info'  => $counts['info']       ?? 0,
             ':excl'  => !empty($scanExclusions) ? implode("\n", $scanExclusions) : null,
+            ':sumj'  => !empty($summary) ? json_encode($summary) : null,
         ]);
         return (int) $pdo->lastInsertId();
     } catch (PDOException $e) {
@@ -876,14 +918,16 @@ function integrity_save_run(PDO $pdo, string $origin, string $dest, string $soft
 
 /**
  * Bulk-inserts findings for a run. Returns number of rows inserted.
+ * Each finding may include optional hash fields: repo_sha256, destination_sha256, repo_size, destination_size.
  */
 function integrity_save_results(PDO $pdo, int $runId, string $origin, string $dest, array $findings): int {
     if (empty($findings)) return 0;
     try {
         $stmt = $pdo->prepare(
             'INSERT INTO scanner_integrity_results
-               (run_id, origin_path, destination_path, type, severity, relative_path, full_path, status, created_at)
-             VALUES (:run, :o, :d, :t, :sev, :rel, :full, \'new\', NOW())'
+               (run_id, origin_path, destination_path, type, severity, relative_path, full_path,
+                repo_sha256, destination_sha256, repo_size, destination_size, status, created_at)
+             VALUES (:run, :o, :d, :t, :sev, :rel, :full, :rsha, :dsha, :rsz, :dsz, \'new\', NOW())'
         );
         $inserted = 0;
         foreach ($findings as $f) {
@@ -895,6 +939,10 @@ function integrity_save_results(PDO $pdo, int $runId, string $origin, string $de
                 ':sev'  => $f['severity'],
                 ':rel'  => $f['rel'],
                 ':full' => $f['fullpath'],
+                ':rsha' => $f['repo_sha256']        ?? null,
+                ':dsha' => $f['destination_sha256'] ?? null,
+                ':rsz'  => $f['repo_size']          ?? null,
+                ':dsz'  => $f['destination_size']   ?? null,
             ]);
             $inserted++;
         }
@@ -976,7 +1024,7 @@ function integrity_load_results_by_ids(PDO $pdo, int $runId, array $ids): array 
  * Updates status (and optional note) for a single result row, scoped to a run.
  */
 function integrity_update_result_status(PDO $pdo, int $runId, int $resultId, string $status, string $note = ''): bool {
-    $allowed = ['new', 'ignored_integrity', 'replaced', 'trashed', 'failed'];
+    $allowed = ['new', 'ignored_integrity', 'replaced', 'trashed', 'failed', 'reviewed'];
     if (!in_array($status, $allowed, true)) return false;
     try {
         $stmt = $pdo->prepare(
@@ -1098,4 +1146,306 @@ function integrity_do_replace_path(
 
     return ['ok' => true, 'error' => ''];
 }
+
+// ── Repo hash database ─────────────────────────────────────────────────────────
+
+function integrity_repo_key(string $app, string $branch, string $version): string {
+    return strtolower($app) . '/' . strtolower($branch) . '/' . strtolower($version);
+}
+
+function integrity_repo_has_hashes(PDO $pdo, string $repoKey): int {
+    try {
+        $stmt = $pdo->prepare("SELECT COUNT(*) FROM scanner_integrity_repo_files WHERE repo_key = :k");
+        $stmt->execute([':k' => $repoKey]);
+        return (int) $stmt->fetchColumn();
+    } catch (PDOException $e) {
+        return 0;
+    }
+}
+
+/**
+ * Generates sha256 hashes for all files in a repo folder and stores them in DB.
+ * Deletes existing records for this repo_key first.
+ * Returns ['ok' => bool, 'error' => string, 'files' => int, 'dirs' => int, 'size' => int, 'errors' => array].
+ */
+function integrity_generate_repo_hashes(PDO $pdo, string $application, string $branch, string $version, string $repoPath): array {
+    @set_time_limit(300);
+
+    $repoKey  = integrity_repo_key($application, $branch, $version);
+    $realRepo = realpath($repoPath);
+    $repoRoot = integrity_repo_root();
+
+    if ($realRepo === false || !is_dir($realRepo)) {
+        return ['ok' => false, 'error' => 'Repo path not found: ' . $repoPath, 'files' => 0, 'dirs' => 0, 'size' => 0, 'errors' => []];
+    }
+    if (!str_starts_with($realRepo, $repoRoot . '/')) {
+        return ['ok' => false, 'error' => 'Repo path must be inside repo root.', 'files' => 0, 'dirs' => 0, 'size' => 0, 'errors' => []];
+    }
+
+    try {
+        $pdo->prepare("DELETE FROM scanner_integrity_repo_files WHERE repo_key = :k")->execute([':k' => $repoKey]);
+
+        $stmt = $pdo->prepare(
+            'INSERT INTO scanner_integrity_repo_files
+               (repo_key, application, branch, version, repo_path, relative_path, file_type, sha256, size_bytes, mtime, created_at)
+             VALUES (:key, :app, :branch, :ver, :repo, :rel, :ft, :sha, :sz, :mt, NOW())'
+        );
+
+        // Scan all items without ucFolder filtering (repo is the reference)
+        $items = [];
+        _int_scan_tree($realRepo, '', [], $items, 50000);
+
+        $files = 0; $dirs = 0; $totalSize = 0; $errors = [];
+
+        foreach ($items as $item) {
+            $fullPath = $realRepo . '/' . $item['rel'];
+
+            if ($item['is_dir']) {
+                $dirs++;
+                $stmt->execute([
+                    ':key' => $repoKey, ':app' => $application, ':branch' => $branch, ':ver' => $version,
+                    ':repo' => $realRepo, ':rel' => $item['rel'],
+                    ':ft' => 'directory', ':sha' => null, ':sz' => null, ':mt' => null,
+                ]);
+            } else {
+                $sha256 = @hash_file('sha256', $fullPath);
+                $size   = @filesize($fullPath);
+                $mtime  = @filemtime($fullPath);
+                if ($sha256 === false) {
+                    $errors[] = $item['rel'];
+                    continue;
+                }
+                $files++;
+                $totalSize += (int) $size;
+                $stmt->execute([
+                    ':key' => $repoKey, ':app' => $application, ':branch' => $branch, ':ver' => $version,
+                    ':repo' => $realRepo, ':rel' => $item['rel'],
+                    ':ft' => 'file', ':sha' => $sha256, ':sz' => $size ?: null, ':mt' => $mtime ?: null,
+                ]);
+            }
+        }
+
+        return ['ok' => true, 'error' => '', 'files' => $files, 'dirs' => $dirs, 'size' => $totalSize, 'errors' => $errors];
+
+    } catch (PDOException $e) {
+        return ['ok' => false, 'error' => 'DB error: ' . $e->getMessage(), 'files' => 0, 'dirs' => 0, 'size' => 0, 'errors' => []];
+    }
+}
+
+/**
+ * Loads all repo index entries for a repo_key, keyed by relative_path.
+ * Returns ['relative_path' => ['file_type', 'sha256', 'size_bytes'], ...].
+ */
+function integrity_load_repo_index(PDO $pdo, string $repoKey): array {
+    try {
+        $stmt = $pdo->prepare(
+            'SELECT relative_path, file_type, sha256, size_bytes
+               FROM scanner_integrity_repo_files
+              WHERE repo_key = :k'
+        );
+        $stmt->execute([':k' => $repoKey]);
+        $index = [];
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            $index[$row['relative_path']] = $row;
+        }
+        return $index;
+    } catch (PDOException $e) {
+        return [];
+    }
+}
+
+/**
+ * Clears run results from DB.
+ * Modes:
+ *   'run'  — deletes scanner_integrity_results and scanner_integrity_runs for a specific run_id
+ *   'dest' — deletes all runs+results for a destination_path
+ *   'all'  — deletes all runs+results
+ * Does NOT delete: repo hashes, integrity ignores, scanner findings, quarantine.
+ */
+function integrity_clear_results(PDO $pdo, string $mode, int $runId = 0, string $destPath = ''): bool {
+    try {
+        if ($mode === 'run' && $runId > 0) {
+            $pdo->prepare("DELETE FROM scanner_integrity_results WHERE run_id = :id")->execute([':id' => $runId]);
+            $pdo->prepare("DELETE FROM scanner_integrity_runs    WHERE id = :id")    ->execute([':id' => $runId]);
+        } elseif ($mode === 'dest' && $destPath !== '') {
+            $pdo->prepare("DELETE r FROM scanner_integrity_results r
+                           INNER JOIN scanner_integrity_runs ru ON ru.id = r.run_id
+                           WHERE ru.destination_path = :d")->execute([':d' => $destPath]);
+            $pdo->prepare("DELETE FROM scanner_integrity_runs WHERE destination_path = :d")->execute([':d' => $destPath]);
+        } elseif ($mode === 'all') {
+            $pdo->exec("DELETE FROM scanner_integrity_results");
+            $pdo->exec("DELETE FROM scanner_integrity_runs");
+        }
+        return true;
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+// ── Hash-based integrity check ─────────────────────────────────────────────────
+
+/**
+ * Returns true if a relative path has any parent directory that is a user-content folder.
+ * Used to skip content inside ucFolders when checking repo items against dest.
+ */
+function _int_under_uc_folder(string $rel, array $ucFolders): bool {
+    foreach ($ucFolders as $ucf) {
+        if (str_starts_with($rel, rtrim($ucf, '/') . '/')) return true;
+    }
+    return false;
+}
+
+/**
+ * Full hash-based integrity check.
+ * Loads repo hash index from DB, scans destination, compares:
+ *   MISSING_FILE / MISSING_DIRECTORY — in repo, absent in dest
+ *   MODIFIED_FILE                    — in both, sha256 differs
+ *   EXTRA_FILE / EXTRA_DIRECTORY     — in dest, absent in repo
+ *   USER_CONTENT_FOLDER              — ucFolder present in dest
+ *
+ * @param string   $repoKey      e.g. 'joomla/v4x/4.4.14'
+ * @param string   $originPath   Filesystem path of the repo (for Replace operations)
+ * @param string   $destPath     Live installation path (must be under /home)
+ * @param string   $software     Detected software for user-content folder list
+ * @param string[] $ignoredPaths Combined pre-run exclusions + post-run DB ignores
+ *
+ * @return array {ok, error, findings, origin, dest, truncated, counts, summary, mode}
+ */
+function integrity_hash_check(
+    PDO    $pdo,
+    string $repoKey,
+    string $originPath,
+    string $destPath,
+    string $software,
+    array  $ignoredPaths
+): array {
+    @set_time_limit(600);
+
+    $empty = ['findings' => [], 'origin' => '', 'dest' => '', 'truncated' => false, 'counts' => [], 'summary' => [], 'mode' => 'hash'];
+
+    $realDest = realpath($destPath);
+    if ($realDest === false || !is_dir($realDest)) {
+        return array_merge($empty, ['ok' => false, 'error' => 'Destination path not accessible: ' . $destPath]);
+    }
+    if ($realDest !== '/home' && !str_starts_with($realDest, '/home/')) {
+        return array_merge($empty, ['ok' => false, 'error' => 'Destination must be inside /home.']);
+    }
+
+    // Load repo index
+    $repoIndex = integrity_load_repo_index($pdo, $repoKey);
+    if (empty($repoIndex)) {
+        return array_merge($empty, ['ok' => false, 'error' => 'No hash database found for this repository. Regenerate hashes first.']);
+    }
+
+    $ucFolders = integrity_user_content_folders($software);
+    $maxItems  = 20000;
+    $truncated = false;
+
+    // Scan destination with ucFolders stop
+    $destItems = [];
+    _int_scan_tree($realDest, '', $ucFolders, $destItems, $maxItems);
+    if (count($destItems) >= $maxItems) $truncated = true;
+    $destSet = array_column($destItems, null, 'rel');
+
+    $findings = [];
+    $counts   = ['suspicious' => 0, 'warning' => 0, 'info' => 0];
+    $summary  = ['checked_files' => 0, 'ok_files' => 0, 'modified_files' => 0,
+                 'missing_files' => 0, 'missing_dirs' => 0, 'extra_files' => 0, 'extra_dirs' => 0];
+
+    // ── Repo → Dest comparison ─────────────────────────────────────────────────
+    foreach ($repoIndex as $rel => $item) {
+        if (integrity_path_is_ignored($rel, $ignoredPaths)) continue;
+        // Skip files inside user-content dirs (dest scan stopped there; would falsely appear MISSING)
+        if (_int_under_uc_folder($rel, $ucFolders)) continue;
+
+        $isUcFolder = ($item['file_type'] === 'directory') && in_array($rel, $ucFolders, true);
+
+        if (!isset($destSet[$rel])) {
+            if ($isUcFolder) {
+                // User-content dir expected but absent — treat as MISSING_DIRECTORY
+                $findings[] = ['type' => 'MISSING_DIRECTORY', 'rel' => $rel,
+                               'fullpath' => $realDest . '/' . $rel, 'severity' => 'warning',
+                               'repo_sha256' => null, 'destination_sha256' => null,
+                               'repo_size' => null, 'destination_size' => null];
+                $counts['warning']++;
+                $summary['missing_dirs']++;
+            } else {
+                $type = ($item['file_type'] === 'directory') ? 'MISSING_DIRECTORY' : 'MISSING_FILE';
+                $findings[] = ['type' => $type, 'rel' => $rel,
+                               'fullpath' => $realDest . '/' . $rel, 'severity' => 'warning',
+                               'repo_sha256' => $item['sha256'], 'destination_sha256' => null,
+                               'repo_size' => $item['size_bytes'], 'destination_size' => null];
+                $counts['warning']++;
+                if ($item['file_type'] === 'directory') $summary['missing_dirs']++;
+                else $summary['missing_files']++;
+            }
+        } elseif ($isUcFolder) {
+            // User-content dir present in dest → info finding
+            $findings[] = ['type' => 'USER_CONTENT_FOLDER', 'rel' => $rel,
+                           'fullpath' => $realDest . '/' . $rel, 'severity' => 'info',
+                           'repo_sha256' => null, 'destination_sha256' => null,
+                           'repo_size' => null, 'destination_size' => null];
+            $counts['info']++;
+        } elseif ($item['file_type'] === 'file') {
+            $summary['checked_files']++;
+            $destFull  = $realDest . '/' . $rel;
+            $destSha   = @hash_file('sha256', $destFull);
+            $destSize  = @filesize($destFull);
+
+            if ($destSha !== false && $item['sha256'] !== null && $destSha !== $item['sha256']) {
+                $summary['modified_files']++;
+                $findings[] = ['type' => 'MODIFIED_FILE', 'rel' => $rel,
+                               'fullpath' => $destFull, 'severity' => 'suspicious',
+                               'repo_sha256' => $item['sha256'], 'destination_sha256' => $destSha,
+                               'repo_size' => $item['size_bytes'], 'destination_size' => $destSize ?: null];
+                $counts['suspicious']++;
+            } else {
+                $summary['ok_files']++;
+            }
+        }
+        // directories other than ucFolders: if present in dest → OK, no finding
+    }
+
+    // ── Dest → Repo: find EXTRA items ─────────────────────────────────────────
+    foreach ($destItems as $item) {
+        $rel = $item['rel'];
+        if (integrity_path_is_ignored($rel, $ignoredPaths)) continue;
+        if ($item['is_user_content']) continue;
+        if (isset($repoIndex[$rel])) continue;
+
+        $type     = $item['is_dir'] ? 'EXTRA_DIRECTORY' : 'EXTRA_FILE';
+        $depth    = substr_count($rel, '/');
+        $severity = ($depth === 0) ? 'suspicious' : 'warning';
+
+        $destSha  = (!$item['is_dir']) ? (@hash_file('sha256', $realDest . '/' . $rel) ?: null) : null;
+        $destSize = (!$item['is_dir']) ? (@filesize($realDest . '/' . $rel) ?: null) : null;
+
+        $findings[] = ['type' => $type, 'rel' => $rel,
+                       'fullpath' => $realDest . '/' . $rel, 'severity' => $severity,
+                       'repo_sha256' => null, 'destination_sha256' => $destSha,
+                       'repo_size' => null, 'destination_size' => $destSize];
+        $counts[$severity]++;
+        if ($item['is_dir']) $summary['extra_dirs']++;
+        else $summary['extra_files']++;
+    }
+
+    $order = ['suspicious' => 0, 'warning' => 1, 'info' => 2];
+    usort($findings, static fn($a, $b) =>
+        ($order[$a['severity']] ?? 9) <=> ($order[$b['severity']] ?? 9)
+        ?: strcmp($a['rel'], $b['rel'])
+    );
+
+    return [
+        'ok'        => true,
+        'error'     => '',
+        'findings'  => $findings,
+        'origin'    => $originPath,
+        'dest'      => $realDest,
+        'truncated' => $truncated,
+        'counts'    => $counts,
+        'summary'   => $summary,
+        'mode'      => 'hash',
+    ];
+}
+
 

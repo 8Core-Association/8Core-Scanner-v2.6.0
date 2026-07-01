@@ -292,6 +292,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 // Proceed immediately
                 $result = _int_do_extract($tmpZip, $targetDir, $impApp, $impBranch, $impVersion);
                 if ($result['ok']) {
+                    // Auto-generate repo hashes
+                    $hashResult = integrity_generate_repo_hashes($pdo, $impApp, $impBranch, $impVersion, $targetDir);
+                    $result['hash_result'] = $hashResult;
                     $_intImportSuccess = $result;
                 } else {
                     foreach ($result['errors'] as $e) $_intMessages[] = ['type' => 'err', 'text' => $e];
@@ -320,6 +323,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             integrity_rmdir_recursive($stored['dir']);
             $result = _int_do_extract($stored['path'], $stored['dir'], $stored['app'], $stored['branch'], $stored['version']);
             if ($result['ok']) {
+                // Delete old hashes then regenerate for the replaced repo
+                $oldKey = integrity_repo_key($stored['app'], $stored['branch'], $stored['version']);
+                try {
+                    $pdo->prepare('DELETE FROM `scanner_integrity_repo_files` WHERE `repo_key` = ?')->execute([$oldKey]);
+                } catch (PDOException $e) { /* ignore */ }
+                $hashResult = integrity_generate_repo_hashes($pdo, $stored['app'], $stored['branch'], $stored['version'], $stored['dir']);
+                $result['hash_result'] = $hashResult;
                 $_intImportSuccess = $result;
             } else {
                 foreach ($result['errors'] as $e) $_intMessages[] = ['type' => 'err', 'text' => $e];
@@ -340,6 +350,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($stored && isset($stored['path'])) @unlink($stored['path']);
     }
 
+    // ── Regenerate repo hashes ─────────────────────────────────────────────────
+    if ($postAction === 'regenerate_hashes') {
+        $rhApp     = strtolower(trim($_POST['rh_app']     ?? ''));
+        $rhBranch  = strtolower(trim($_POST['rh_branch']  ?? ''));
+        $rhVersion = strtolower(trim($_POST['rh_version'] ?? ''));
+
+        if (!integrity_valid_name($rhApp) || !integrity_valid_loose($rhBranch) || !integrity_valid_loose($rhVersion)) {
+            _int_flash_set('err', 'Invalid app / branch / version for hash regeneration.');
+        } else {
+            $repoPath = integrity_repo_root() . '/' . $rhApp . '/' . $rhBranch . '/' . $rhVersion;
+            if (!is_dir($repoPath)) {
+                _int_flash_set('err', 'Repository path does not exist: ' . $repoPath);
+            } else {
+                $hr = integrity_generate_repo_hashes($pdo, $rhApp, $rhBranch, $rhVersion, $repoPath);
+                if ($hr['ok']) {
+                    _int_flash_set('ok', 'Hashes regenerated for ' . $rhApp . '/' . $rhBranch . '/' . $rhVersion
+                        . ': ' . number_format($hr['files']) . ' file(s), '
+                        . ($hr['errors'] > 0 ? $hr['errors'] . ' error(s).' : 'no errors.'));
+                } else {
+                    _int_flash_set('err', 'Hash generation failed: ' . ($hr['error'] ?? 'unknown error'));
+                }
+            }
+        }
+        header('Location: module.php?module=8core-integrity&page=module_integrity&tab=repo');
+        exit;
+    }
+
+    // ── Clear integrity results ────────────────────────────────────────────────
+    if ($postAction === 'clear_results') {
+        $clearMode   = trim($_POST['clear_mode']   ?? '');
+        $clearRunId  = (int) ($_POST['clear_run_id']  ?? 0);
+        $clearDest   = trim($_POST['clear_dest']   ?? '');
+
+        $allowedModes = ['run', 'dest', 'all'];
+        if (!in_array($clearMode, $allowedModes, true)) {
+            _int_flash_set('err', 'Invalid clear mode.');
+        } else {
+            $ok = integrity_clear_results($pdo, $clearMode, $clearRunId, $clearDest);
+            if ($ok) {
+                $label = match($clearMode) {
+                    'run'  => 'Run #' . $clearRunId . ' results cleared.',
+                    'dest' => 'All results for destination "' . $clearDest . '" cleared.',
+                    'all'  => 'All integrity check results cleared.',
+                };
+                _int_flash_set('ok', $label);
+                header('Location: module.php?module=8core-integrity&page=module_integrity&tab=check');
+                exit;
+            } else {
+                _int_flash_set('err', 'Failed to clear results.');
+            }
+        }
+        $redirectRunId = ($clearMode === 'run' && $clearRunId > 0) ? $clearRunId : 0;
+        header('Location: ' . _int_build_check_url($redirectRunId));
+        exit;
+    }
+
     // ── Run structural check ───────────────────────────────────────────────────
     if ($postAction === 'run_structural_check') {
         $_intDetSoftware  = trim($_POST['detected_software'] ?? '');
@@ -357,16 +423,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Merge: pre-run exclusions (prefix/) + DB exact ignores
             $combinedIgnores = array_merge($preRunExclusions, $dbIgnores);
 
-            $result = integrity_structural_check($_intCheckOrigin, $_intCheckDest, $_intDetSoftware, $combinedIgnores);
+            // Detect if origin has a hash DB — use hash check when available
+            $__originReal = rtrim(realpath($_intCheckOrigin) ?: $_intCheckOrigin, '/');
+            $__parts      = array_filter(explode('/', $__originReal));
+            $__partsArr   = array_values($__parts);
+            $__repoRoot   = rtrim(realpath(integrity_repo_root()) ?: integrity_repo_root(), '/');
+            $__rootParts  = array_filter(explode('/', $__repoRoot));
+            $__rootDepth  = count($__rootParts);
+            // Extract app/branch/version from path relative to repo root
+            $__relParts   = array_slice($__partsArr, $__rootDepth);
+            $__useHash    = false;
+            $__repoKey    = '';
+            if (count($__relParts) >= 3) {
+                $__repoKey = integrity_repo_key($__relParts[0], $__relParts[1], $__relParts[2]);
+                $__useHash = integrity_repo_has_hashes($pdo, $__repoKey) > 0;
+            }
+
+            if ($__useHash) {
+                $result = integrity_hash_check($pdo, $__repoKey, $_intCheckOrigin, $_intCheckDest, $_intDetSoftware, $combinedIgnores);
+            } else {
+                $result = integrity_structural_check($_intCheckOrigin, $_intCheckDest, $_intDetSoftware, $combinedIgnores);
+            }
+
             if (!$result['ok']) {
                 $_intMessages[] = ['type' => 'err', 'text' => 'Check failed: ' . $result['error']];
             } else {
-                $runId = integrity_save_run($pdo, $result['origin'], $result['dest'], $_intDetSoftware, $result['counts'], $preRunExclusions);
+                $checkMode = $result['mode'] ?? 'structural';
+                $summary   = $result['summary'] ?? [];
+                $runId = integrity_save_run($pdo, $result['origin'], $result['dest'], $_intDetSoftware, $result['counts'], $preRunExclusions, $checkMode, $summary);
                 if ($runId > 0) {
                     integrity_save_results($pdo, $runId, $result['origin'], $result['dest'], $result['findings']);
-                    _int_flash_set('ok', 'Structural check complete. '
+                    $modeLabel = ($checkMode === 'hash') ? 'Hash check' : 'Structural check';
+                    _int_flash_set('ok', $modeLabel . ' complete. '
                         . count($result['findings']) . ' finding(s) found'
                         . (!empty($preRunExclusions) ? ' (' . count($preRunExclusions) . ' exclusion(s) applied)' : '')
+                        . ($__useHash ? '' : ' (no hash index — structural only)')
                         . '.');
                     header('Location: ' . _int_build_check_url($runId));
                     exit;
@@ -426,6 +517,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     _int_flash_set('err', 'Trash failed: ' . $tr['error']);
                 }
             } elseif ($action === 'replace') {
+                if ($row['type'] === 'MODIFIED_FILE') {
+                    // Trash the modified dest file first, then copy clean from origin
+                    $tr = integrity_do_trash_path($row['full_path'], $row['destination_path'], $row['relative_path']);
+                    if (!$tr['ok']) {
+                        integrity_update_result_status($pdo, $runId, $resultId, 'failed', $tr['error']);
+                        _int_flash_set('err', 'Trash (pre-replace) failed: ' . $tr['error']);
+                        header('Location: ' . _int_build_check_url($runId, $filters));
+                        exit;
+                    }
+                }
                 $rr = integrity_do_replace_path($row['origin_path'], $row['relative_path'],
                                                 $row['destination_path'], $row['relative_path']);
                 if ($rr['ok']) {
@@ -435,6 +536,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     integrity_update_result_status($pdo, $runId, $resultId, 'failed', $rr['error']);
                     _int_flash_set('err', 'Replace failed: ' . $rr['error']);
                 }
+            } elseif ($action === 'mark_reviewed') {
+                integrity_update_result_status($pdo, $runId, $resultId, 'reviewed');
+                _int_flash_set('ok', 'Marked as reviewed: ' . $row['relative_path']);
             }
         }
         header('Location: ' . _int_build_check_url($runId, $filters));
@@ -460,7 +564,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ? _int_parse_id_range($idRange)
             : $checkedIds;
 
-        $allowedBulk = ['ignore', 'trash', 'replace_missing'];
+        $allowedBulk = ['ignore', 'trash', 'replace_missing', 'replace_modified', 'mark_reviewed'];
         if (!in_array($bulkAction, $allowedBulk, true) || empty($ids) || $runId <= 0) {
             _int_flash_set('err', 'No items selected or invalid bulk action.');
             header('Location: ' . _int_build_check_url($runId, $filters));
@@ -483,6 +587,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $eligible   = array_filter($rows, fn($r) => str_starts_with($r['type'], 'MISSING_') && $r['status'] === 'new');
             $skipped    = count($rows) - count($eligible);
             $skipReason = 'only MISSING_* rows with status "new" can be replaced';
+        } elseif ($bulkAction === 'replace_modified') {
+            $eligible   = array_filter($rows, fn($r) => $r['type'] === 'MODIFIED_FILE' && $r['status'] === 'new');
+            $skipped    = count($rows) - count($eligible);
+            $skipReason = 'only MODIFIED_FILE rows with status "new" can be replaced';
+        } elseif ($bulkAction === 'mark_reviewed') {
+            $eligible   = array_filter($rows, fn($r) => $r['status'] === 'new');
+            $skipped    = count($rows) - count($eligible);
+            $skipReason = 'only rows with status "new" can be marked reviewed';
         } else { // ignore
             $eligible   = array_filter($rows, fn($r) => $r['status'] === 'new');
             $skipped    = count($rows) - count($eligible);
@@ -521,7 +633,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'path'     => trim($_POST['fp']  ?? ''),
         ]);
 
-        if ($runId > 0 && !empty($ids) && in_array($bulkAction, ['ignore', 'trash', 'replace_missing'], true)) {
+        if ($runId > 0 && !empty($ids) && in_array($bulkAction, ['ignore', 'trash', 'replace_missing', 'replace_modified', 'mark_reviewed'], true)) {
             $rows  = integrity_load_results_by_ids($pdo, $runId, $ids);
             $ok    = 0;
             $fail  = 0;
@@ -554,13 +666,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         integrity_update_result_status($pdo, $runId, (int) $row['id'], 'failed', $rr['error']);
                         $fail++;
                     }
+                } elseif ($bulkAction === 'replace_modified' && $row['type'] === 'MODIFIED_FILE') {
+                    // Trash existing modified file first, then replace from origin
+                    $tr = integrity_do_trash_path($row['full_path'], $row['destination_path'], $row['relative_path']);
+                    if (!$tr['ok']) {
+                        integrity_update_result_status($pdo, $runId, (int) $row['id'], 'failed', $tr['error']);
+                        $fail++;
+                        continue;
+                    }
+                    $rr = integrity_do_replace_path($row['origin_path'], $row['relative_path'],
+                                                    $row['destination_path'], $row['relative_path']);
+                    if ($rr['ok']) {
+                        integrity_update_result_status($pdo, $runId, (int) $row['id'], 'replaced');
+                        $ok++;
+                    } else {
+                        integrity_update_result_status($pdo, $runId, (int) $row['id'], 'failed', $rr['error']);
+                        $fail++;
+                    }
+                } elseif ($bulkAction === 'mark_reviewed') {
+                    integrity_update_result_status($pdo, $runId, (int) $row['id'], 'reviewed');
+                    $ok++;
                 }
             }
 
             $label = match($bulkAction) {
                 'ignore'          => 'Bulk ignore',
                 'trash'           => 'Bulk trash',
-                'replace_missing' => 'Bulk replace',
+                'replace_missing' => 'Bulk replace missing',
+                'replace_modified'=> 'Bulk replace modified',
+                'mark_reviewed'   => 'Bulk mark reviewed',
                 default           => 'Bulk action',
             };
             $msg = "{$label}: {$ok} succeeded";
@@ -956,6 +1090,29 @@ require __DIR__ . '/../../../includes/version.php';
 /* ── Run exclusions tag ── */
 .int-excl-tag { display:inline-flex; align-items:center; gap:4px; padding:2px 7px; border-radius:10px; font-size:10px; font-weight:600; background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; font-family:var(--font-mono,monospace); }
 
+/* ── Check mode badge ── */
+.int-mode-badge { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:10px; font-size:10px; font-weight:700; letter-spacing:.04em; white-space:nowrap; }
+.int-mode-badge.is-hash       { background:#dcfce7; color:#166534; border:1px solid #bbf7d0; }
+.int-mode-badge.is-structural { background:#f1f5f9; color:#475569; border:1px solid #e2e8f0; }
+
+/* ── Hash columns ── */
+.int-hash-cell { font-family:var(--font-mono,monospace); font-size:10px; white-space:nowrap; }
+.int-hash-short { cursor:default; border-bottom:1px dashed var(--border); }
+.int-hash-match  { color:#16a34a; }
+.int-hash-differ { color:#dc2626; font-weight:700; }
+.int-hash-none   { color:#94a3b8; }
+
+/* ── Status badges extended ── */
+.int-status-badge.reviewed { background:#eff6ff; color:#1d4ed8; }
+
+/* ── MODIFIED_FILE row highlight ── */
+.int-results-table tr.type-modified td { background:rgba(220,38,38,.06); }
+
+/* ── Summary counters in run bar ── */
+.int-summary-counters { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:3px; }
+.int-summary-counter  { font-size:11px; color:var(--text-muted); }
+.int-summary-counter strong { color:var(--text); }
+
 @media (max-width:720px) {
   .int-form-grid { grid-template-columns:1fr; }
   .int-tree-wrap { flex-direction:column; }
@@ -977,7 +1134,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   <div class="topbar">
     <div class="topbar-title">8Core Integrity</div>
     <div class="topbar-meta">
-      <span style="font-size:12px;color:var(--text-muted);">v0.7.0</span>
+      <span style="font-size:12px;color:var(--text-muted);">v0.8.0</span>
       &nbsp;&nbsp;<a href="../logout.php" style="color:var(--text-muted);font-size:12px;">Odjava</a>
     </div>
   </div>
@@ -1022,6 +1179,23 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               <div class="int-success-stat-label">Total size</div>
               <div class="int-success-stat-value"><?= h($s['size']) ?></div>
             </div>
+            <?php if (!empty($s['hash_result'])): $hr = $s['hash_result']; ?>
+            <div class="int-success-stat">
+              <div class="int-success-stat-label">Hashes generated</div>
+              <div class="int-success-stat-value" style="<?= $hr['ok'] ? 'color:#16a34a' : 'color:#dc2626' ?>">
+                <?= $hr['ok'] ? number_format($hr['files']) : 'Error' ?>
+              </div>
+            </div>
+            <?php if (!$hr['ok']): ?>
+            <div style="width:100%;margin-top:8px;font-size:11px;color:#dc2626;background:#fee2e2;border:1px solid #fca5a5;border-radius:5px;padding:6px 10px;">
+              Hash generation failed: <?= h($hr['error'] ?? 'unknown error') ?>
+            </div>
+            <?php elseif (!empty($hr['errors']) && $hr['errors'] > 0): ?>
+            <div style="width:100%;margin-top:8px;font-size:11px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:5px;padding:6px 10px;">
+              <?= (int)$hr['errors'] ?> file(s) could not be hashed (permission error or unreadable).
+            </div>
+            <?php endif; ?>
+            <?php endif; ?>
           </div>
         </div>
       </div>
@@ -1300,6 +1474,72 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
       </div>
     </div>
 
+    <!-- ══════════════════════════════════════════════════════ -->
+    <!-- ── Section: Imported Repositories & Hash Index ── -->
+    <!-- ══════════════════════════════════════════════════════ -->
+    <?php if (!empty($_intAllImported)): ?>
+    <div class="int-section">
+      <div class="int-section-header">
+        <h3>Imported Repositories &amp; Hash Index</h3>
+      </div>
+      <hr class="int-divider">
+      <div class="int-body">
+        <p style="margin:0 0 14px;font-size:12px;color:var(--text-muted);">
+          Hashes are generated automatically after each ZIP import. Use <strong>Regenerate hashes</strong> to rebuild the index after a manual file change or if the initial generation failed.
+        </p>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:7px 12px;border-bottom:2px solid var(--border);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);background:var(--surface2);">Repository</th>
+              <th style="text-align:left;padding:7px 12px;border-bottom:2px solid var(--border);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);background:var(--surface2);">Hash index</th>
+              <th style="padding:7px 12px;border-bottom:2px solid var(--border);background:var(--surface2);"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php
+            $__repoRootReal = rtrim(realpath($_intRepoRoot) ?: $_intRepoRoot, '/');
+            foreach ($_intAllImported as $__imp):
+                $__impPath  = rtrim($__imp['path'], '/');
+                $__impRel   = ltrim(substr($__impPath, strlen($__repoRootReal)), '/');
+                $__impParts = explode('/', $__impRel);
+                if (count($__impParts) < 3) continue;
+                [$__impApp, $__impBranch, $__impVer] = $__impParts;
+                $__rk       = integrity_repo_key($__impApp, $__impBranch, $__impVer);
+                $__hcount   = integrity_repo_has_hashes($pdo, $__rk);
+            ?>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:8px 12px;font-family:var(--font-mono,monospace);"><?= h($__imp['label']) ?></td>
+              <td style="padding:8px 12px;">
+                <?php if ($__hcount > 0): ?>
+                <span style="display:inline-flex;align-items:center;gap:5px;">
+                  <span style="color:#16a34a;font-size:12px;font-weight:700;">&#10003;</span>
+                  <span style="font-size:12px;color:var(--text);"><?= number_format($__hcount) ?> files indexed</span>
+                </span>
+                <?php else: ?>
+                <span style="color:#dc2626;font-size:12px;">No hash index</span>
+                <?php endif; ?>
+              </td>
+              <td style="padding:8px 12px;text-align:right;">
+                <form method="post" action="module.php?module=8core-integrity&page=module_integrity" style="display:inline">
+                  <input type="hidden" name="action"     value="regenerate_hashes">
+                  <input type="hidden" name="rh_app"     value="<?= h($__impApp) ?>">
+                  <input type="hidden" name="rh_branch"  value="<?= h($__impBranch) ?>">
+                  <input type="hidden" name="rh_version" value="<?= h($__impVer) ?>">
+                  <?= csrf_field() ?>
+                  <button type="submit" class="btn btn-ghost" style="font-size:11px;padding:4px 10px;"
+                          onclick="return confirm('Regenerate hashes for <?= h(addslashes($__imp['label'])) ?>? Existing index will be replaced.')">
+                    Regenerate hashes
+                  </button>
+                </form>
+              </td>
+            </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <?php endif; ?>
+
     </div><!-- /#int-tab-repo -->
 
     <!-- ── Tab panel: Integrity Check ────────────────────────────────────── -->
@@ -1397,12 +1637,12 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
 
           <div style="margin-top:14px;">
             <button type="submit" class="btn btn-primary">
-              Run Structural Check
+              Run Integrity Check
             </button>
           </div>
         </form>
         <div class="int-placeholder">
-          Structural check compares file/folder existence only. Hash comparison will be available in a future version.
+          If the selected origin repository has a hash index, a full hash check (MISSING / MODIFIED / EXTRA) will run automatically. Otherwise a structural (file existence only) check is used.
         </div>
 
         <?php
@@ -1410,9 +1650,11 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
         if ($_intBulkConfirm):
             $bc      = $_intBulkConfirm;
             $bcLabel = match($bc['action']) {
-                'trash'           => 'Move to Integrity Trash',
-                'replace_missing' => 'Replace missing from Origin',
-                default           => 'Ignore in Integrity',
+                'trash'            => 'Move to Integrity Trash',
+                'replace_missing'  => 'Replace missing from Origin',
+                'replace_modified' => 'Replace modified from Origin',
+                'mark_reviewed'    => 'Mark as Reviewed',
+                default            => 'Ignore in Integrity',
             };
         ?>
         <div class="int-bulk-confirm">
@@ -1472,6 +1714,19 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               <div class="int-run-bar-val"><?= h(date('Y-m-d H:i', strtotime($meta['created_at']))) ?></div>
             </div>
             <div class="int-run-bar-sep"></div>
+            <?php
+              $__checkMode = $meta['check_mode'] ?? 'structural';
+              $__isHash    = $__checkMode === 'hash';
+            ?>
+            <div class="int-run-bar-item">
+              <div class="int-run-bar-label">Mode</div>
+              <div style="margin-top:2px;">
+                <span class="int-mode-badge <?= $__isHash ? 'is-hash' : 'is-structural' ?>">
+                  <?= $__isHash ? 'HASH CHECK' : 'STRUCTURAL' ?>
+                </span>
+              </div>
+            </div>
+            <div class="int-run-bar-sep"></div>
             <div class="int-run-bar-item">
               <div class="int-run-bar-label">Origin</div>
               <div class="int-run-bar-val"><?= h($meta['origin_path']) ?></div>
@@ -1499,6 +1754,35 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               <?php endif; ?>
               <span style="font-size:11px;color:var(--text-muted);"><?= (int)$meta['total'] ?> total</span>
             </div>
+            <?php
+              $__summary = [];
+              if (!empty($meta['summary_json'])) {
+                  $__summary = json_decode($meta['summary_json'], true) ?: [];
+              }
+              if (!empty($__summary)):
+            ?>
+            <div class="int-run-bar-sep"></div>
+            <div class="int-run-bar-item">
+              <div class="int-run-bar-label">Hash summary</div>
+              <div class="int-summary-counters">
+                <?php if (isset($__summary['checked_files'])): ?>
+                <span class="int-summary-counter"><strong><?= number_format((int)$__summary['checked_files']) ?></strong> checked</span>
+                <?php endif; ?>
+                <?php if (isset($__summary['ok_files']) && $__summary['ok_files'] > 0): ?>
+                <span class="int-summary-counter" style="color:#16a34a;"><strong><?= number_format((int)$__summary['ok_files']) ?></strong> ok</span>
+                <?php endif; ?>
+                <?php if (isset($__summary['modified_files']) && $__summary['modified_files'] > 0): ?>
+                <span class="int-summary-counter" style="color:#dc2626;"><strong><?= number_format((int)$__summary['modified_files']) ?></strong> modified</span>
+                <?php endif; ?>
+                <?php if (isset($__summary['missing_files']) && $__summary['missing_files'] > 0): ?>
+                <span class="int-summary-counter" style="color:#d97706;"><strong><?= number_format((int)$__summary['missing_files']) ?></strong> missing</span>
+                <?php endif; ?>
+                <?php if (isset($__summary['extra_files']) && $__summary['extra_files'] > 0): ?>
+                <span class="int-summary-counter"><strong><?= number_format((int)$__summary['extra_files']) ?></strong> extra</span>
+                <?php endif; ?>
+              </div>
+            </div>
+            <?php endif; ?>
             <?php if (!empty($meta['scan_exclusions'])): ?>
             <div class="int-run-bar-sep"></div>
             <div class="int-run-bar-item" style="max-width:320px;">
@@ -1512,6 +1796,18 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               </div>
             </div>
             <?php endif; ?>
+            <div class="int-run-bar-actions">
+              <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline;">
+                <input type="hidden" name="action"       value="clear_results">
+                <input type="hidden" name="clear_mode"   value="run">
+                <input type="hidden" name="clear_run_id" value="<?= (int)$_intRunId ?>">
+                <?= csrf_field() ?>
+                <button type="submit" class="btn btn-ghost" style="font-size:11px;padding:4px 10px;color:#dc2626;border-color:#fca5a5;"
+                        onclick="return confirm('Delete all results for Run #<?= (int)$_intRunId ?>? This cannot be undone.')">
+                  Clear run
+                </button>
+              </form>
+            </div>
           </div>
 
           <!-- Filter bar (result filters only — not scan exclusions) -->
@@ -1528,7 +1824,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               <label>Type</label>
               <select name="ft">
                 <option value="">All types</option>
-                <?php foreach (['EXTRA_FILE','EXTRA_DIRECTORY','MISSING_FILE','MISSING_DIRECTORY','USER_CONTENT_FOLDER'] as $ft): ?>
+                <?php foreach (['EXTRA_FILE','EXTRA_DIRECTORY','MISSING_FILE','MISSING_DIRECTORY','MODIFIED_FILE','USER_CONTENT_FOLDER'] as $ft): ?>
                 <option value="<?= h($ft) ?>" <?= ($_intRunFilters['type'] ?? '') === $ft ? 'selected' : '' ?>><?= h($ft) ?></option>
                 <?php endforeach; ?>
               </select>
@@ -1548,6 +1844,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                 <option value="">All</option>
                 <option value="new"               <?= ($_intRunFilters['status'] ?? '') === 'new'               ? 'selected' : '' ?>>New</option>
                 <option value="ignored_integrity" <?= ($_intRunFilters['status'] ?? '') === 'ignored_integrity' ? 'selected' : '' ?>>Ignored</option>
+                <option value="reviewed"          <?= ($_intRunFilters['status'] ?? '') === 'reviewed'          ? 'selected' : '' ?>>Reviewed</option>
                 <option value="trashed"           <?= ($_intRunFilters['status'] ?? '') === 'trashed'           ? 'selected' : '' ?>>Trashed</option>
                 <option value="replaced"          <?= ($_intRunFilters['status'] ?? '') === 'replaced'          ? 'selected' : '' ?>>Replaced</option>
                 <option value="failed"            <?= ($_intRunFilters['status'] ?? '') === 'failed'            ? 'selected' : '' ?>>Failed</option>
@@ -1591,6 +1888,8 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                   <option value="ignore">Ignore in Integrity</option>
                   <option value="trash">Move to Integrity Trash (EXTRA only)</option>
                   <option value="replace_missing">Replace missing from Origin (MISSING only)</option>
+                  <option value="replace_modified">Replace modified from Origin (MODIFIED_FILE only)</option>
+                  <option value="mark_reviewed">Mark as Reviewed</option>
                 </select>
               </div>
               <div style="display:flex;flex-direction:column;">
@@ -1618,17 +1917,20 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                   <th>Severity</th>
                   <th>Type</th>
                   <th>Path</th>
+                  <th>Hashes</th>
                   <th>Status</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 <?php foreach ($results as $r):
-                  $isActioned = $r['status'] !== 'new';
-                  $isExtra    = str_starts_with($r['type'], 'EXTRA_');
-                  $isMissing  = str_starts_with($r['type'], 'MISSING_');
+                  $isActioned  = $r['status'] !== 'new';
+                  $isExtra     = str_starts_with($r['type'], 'EXTRA_');
+                  $isMissing   = str_starts_with($r['type'], 'MISSING_');
+                  $isModified  = $r['type'] === 'MODIFIED_FILE';
+                  $__trClass   = 'sev-' . h($r['severity']) . ($isActioned ? ' is-actioned' : '') . ($isModified ? ' type-modified' : '');
                 ?>
-                <tr class="sev-<?= h($r['severity']) ?><?= $isActioned ? ' is-actioned' : '' ?>">
+                <tr class="<?= $__trClass ?>">
                   <td>
                     <?php if (!$isActioned): ?>
                     <input type="checkbox" name="result_ids[]" value="<?= (int)$r['id'] ?>" class="int-row-cb">
@@ -1641,6 +1943,29 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                     <div class="int-result-rel"><?= h($r['relative_path']) ?></div>
                     <div class="int-result-full"><?= h($r['full_path']) ?></div>
                   </td>
+                  <td class="int-hash-cell">
+                    <?php
+                      $__rsha = $r['repo_sha256']        ?? null;
+                      $__dsha = $r['destination_sha256'] ?? null;
+                      if ($__rsha || $__dsha):
+                        $__match = ($__rsha && $__dsha && $__rsha === $__dsha);
+                    ?>
+                    <div style="display:flex;flex-direction:column;gap:2px;">
+                      <?php if ($__rsha): ?>
+                      <span title="Repo: <?= h($__rsha) ?>" class="int-hash-short <?= $__match ? 'int-hash-match' : ($__dsha ? 'int-hash-differ' : '') ?>">
+                        R:<?= h(substr($__rsha, 0, 8)) ?>&hellip;
+                      </span>
+                      <?php endif; ?>
+                      <?php if ($__dsha): ?>
+                      <span title="Dest: <?= h($__dsha) ?>" class="int-hash-short <?= $__match ? 'int-hash-match' : 'int-hash-differ' ?>">
+                        D:<?= h(substr($__dsha, 0, 8)) ?>&hellip;
+                      </span>
+                      <?php endif; ?>
+                    </div>
+                    <?php else: ?>
+                    <span class="int-hash-none">&mdash;</span>
+                    <?php endif; ?>
+                  </td>
                   <td>
                     <span class="int-status-badge <?= h($r['status']) ?>"><?= h(str_replace('_', ' ', $r['status'])) ?></span>
                     <?php if ($r['note'] && $r['status'] === 'trashed'): ?>
@@ -1650,7 +1975,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                   <td>
                     <?php if (!$isActioned): ?>
                     <div class="int-row-actions">
-                      <!-- Ignore with subtree select -->
+                      <!-- Ignore with subtree select (all non-USER_CONTENT types) -->
                       <?php if ($r['type'] !== 'USER_CONTENT_FOLDER'):
                         $ignOpts = _int_ignore_options($r['relative_path']);
                       ?>
@@ -1681,7 +2006,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                       </form>
                       <?php endif; ?>
                       <?php if ($isExtra): ?>
-                      <!-- Trash -->
+                      <!-- Trash EXTRA -->
                       <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
                         <input type="hidden" name="action"        value="action_result">
                         <input type="hidden" name="run_id"        value="<?= (int)$_intRunId ?>">
@@ -1696,8 +2021,8 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                           Trash
                         </button>
                       </form>
-                      <?php elseif ($isMissing): ?>
-                      <!-- Replace from origin -->
+                      <?php elseif ($isMissing || $isModified): ?>
+                      <!-- Replace from origin (MISSING or MODIFIED) -->
                       <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
                         <input type="hidden" name="action"        value="action_result">
                         <input type="hidden" name="run_id"        value="<?= (int)$_intRunId ?>">
@@ -1708,12 +2033,29 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                         <?php endforeach; ?>
                         <?= csrf_field() ?>
                         <button type="button" class="int-btn-act act-replace"
-                                title="Copy missing file/folder from origin repository to destination."
-                                onclick="if(confirm('Replace &quot;<?= h(addslashes($r['relative_path'])) ?>&quot; from origin?')) this.closest('form').submit()">
+                                title="<?= $isModified ? 'Trash modified file then copy clean version from origin.' : 'Copy missing file/folder from origin repository to destination.' ?>"
+                                onclick="if(confirm('Replace &quot;<?= h(addslashes($r['relative_path'])) ?>&quot; from origin?<?= $isModified ? ' (modified file will be trashed first)' : '' ?>')) this.closest('form').submit()">
                           Replace
                         </button>
                       </form>
                       <?php endif; ?>
+                      <!-- Mark reviewed -->
+                      <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
+                        <input type="hidden" name="action"        value="action_result">
+                        <input type="hidden" name="run_id"        value="<?= (int)$_intRunId ?>">
+                        <input type="hidden" name="result_id"     value="<?= (int)$r['id'] ?>">
+                        <input type="hidden" name="result_action" value="mark_reviewed">
+                        <?php foreach (_int_filters_to_get($_intRunFilters) as $fk => $fv): ?>
+                        <input type="hidden" name="<?= h($fk) ?>" value="<?= h($fv) ?>">
+                        <?php endforeach; ?>
+                        <?= csrf_field() ?>
+                        <button type="button" class="int-btn-act"
+                                style="font-size:10px;padding:2px 6px;"
+                                title="Mark this finding as manually reviewed."
+                                onclick="this.closest('form').submit()">
+                          Reviewed
+                        </button>
+                      </form>
                     </div>
                     <?php else: ?>
                     <span style="font-size:11px;color:var(--text-muted);">—</span>

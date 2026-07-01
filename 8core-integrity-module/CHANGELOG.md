@@ -1,6 +1,44 @@
 # 8Core Integrity — Changelog
 
-## [0.7.0] — 2026-07-01
+## [0.8.0] — 2026-07-01
+
+### Added
+
+- `install/migrations/20260701_009_add_integrity_repo_files.sql`: creates `scanner_integrity_repo_files` table — stores per-file sha256 hashes for imported origin repositories (`repo_key`, `application`, `branch`, `version`, `relative_path`, `file_type`, `sha256`, `size_bytes`, `mtime`)
+- `install/migrations/20260701_010_alter_integrity_add_hash_cols.sql`: adds `repo_sha256 CHAR(64)`, `destination_sha256 CHAR(64)`, `repo_size BIGINT`, `destination_size BIGINT` to `scanner_integrity_results`; adds `check_mode VARCHAR(20)`, `summary_json TEXT` to `scanner_integrity_runs`
+- `includes/integrity.php` — `integrity_repo_key(string $app, string $branch, string $version): string`: canonical lowercase `app/branch/version` key for DB lookups
+- `includes/integrity.php` — `integrity_repo_has_hashes(PDO $pdo, string $repoKey): int`: returns file count in hash index for a repo key
+- `includes/integrity.php` — `integrity_generate_repo_hashes(PDO $pdo, string $application, string $branch, string $version, string $repoPath): array`: scans repo dir, computes sha256 per file, stores in `scanner_integrity_repo_files`; replaces any existing index for the same key; respects `set_time_limit(300)`
+- `includes/integrity.php` — `integrity_load_repo_index(PDO $pdo, string $repoKey): array`: loads full hash index keyed by relative_path
+- `includes/integrity.php` — `integrity_clear_results(PDO $pdo, string $mode, int $runId = 0, string $destPath = ''): bool`: deletes integrity run/result rows; modes: `run` (single run), `dest` (all for destination path), `all`; does NOT touch ignores, repo hashes, or scanner findings
+- `includes/integrity.php` — `integrity_hash_check(PDO $pdo, string $repoKey, string $originPath, string $destPath, string $software, array $ignoredPaths): array`: full hash comparison — MISSING_FILE/MISSING_DIRECTORY (warning), MODIFIED_FILE (suspicious, both hashes recorded), EXTRA_FILE/EXTRA_DIRECTORY, USER_CONTENT_FOLDER; returns `mode = 'hash'`, `summary` counts, and per-finding `repo_sha256`/`destination_sha256`
+- `includes/integrity.php` — `_int_under_uc_folder(string $rel, array $ucFolders): bool`: prevents MISSING false positives for files inside user-content directories when comparing repo index to dest scan
+- `includes/integrity.php` — `integrity_update_result_status()` now accepts `reviewed` as a valid status
+- `includes/integrity.php` — `integrity_save_results()` now stores `repo_sha256`, `destination_sha256`, `repo_size`, `destination_size` per finding
+- `includes/integrity.php` — `integrity_save_run()` now accepts `string $checkMode = 'structural'` and `array $summary = []` parameters; summary stored as JSON
+- `includes/integrity.php` — `integrity_ensure_tables()` now also creates `scanner_integrity_repo_files` and runs safe ALTER statements for new hash columns
+- `admin/module_integrity.php` — ZIP import (`import_zip`, `import_zip_replace`): automatically runs `integrity_generate_repo_hashes()` after successful extraction; import success panel shows hash count and any errors
+- `admin/module_integrity.php` — `regenerate_hashes` POST handler: deletes existing index, regenerates hashes for a specific repo, flash message with file count
+- `admin/module_integrity.php` — `clear_results` POST handler: supports `run`, `dest`, `all` modes with PRG flow
+- `admin/module_integrity.php` — `run_structural_check` handler: auto-detects hash DB availability from origin path; uses `integrity_hash_check()` when hashes exist, falls back to `integrity_structural_check()` with notice; passes `check_mode` and `summary` to `integrity_save_run()`
+- `admin/module_integrity.php` — `action_result` handler: MODIFIED_FILE replace now trashes existing dest file first, then copies clean version from origin
+- `admin/module_integrity.php` — `action_result` handler: new `mark_reviewed` action sets status to `reviewed`
+- `admin/module_integrity.php` — bulk actions: added `replace_modified` (trash + replace MODIFIED_FILE rows) and `mark_reviewed`
+- `admin/module_integrity.php` — Run info bar: check mode badge (HASH CHECK / STRUCTURAL), hash summary counters (checked, ok, modified, missing, extra), Clear Run button
+- `admin/module_integrity.php` — Results table: hash columns (repo sha256, dest sha256, 8-char truncated with full on hover, color-coded match/differ); MODIFIED_FILE row highlight; updated action buttons (MISSING + MODIFIED get Replace; Replace for MODIFIED notes trash-first); Mark Reviewed button on all new rows
+- `admin/module_integrity.php` — Type filter: added MODIFIED_FILE option
+- `admin/module_integrity.php` — Status filter: added `reviewed` option; status badge CSS added
+- `admin/module_integrity.php` — Bulk dropdown: added "Replace modified from Origin" and "Mark as Reviewed"
+- `admin/module_integrity.php` — Repository Manager: new "Imported Repositories & Hash Index" section showing hash count per repo with Regenerate Hashes button
+- `admin/module_integrity.php` — Integrity Check form button renamed to "Run Integrity Check"; placeholder text updated to reflect hash-first logic
+
+### Changed
+
+- `includes/integrity.php` — `integrity_structural_check()` returns `mode = 'structural'` in result array for consistency with `integrity_hash_check()`
+- `module.php` — version bumped to `0.8.0`
+- `admin/module_integrity.php` — version display updated to `v0.8.0`
+
+
 
 ### Added
 
