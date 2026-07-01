@@ -18,8 +18,50 @@ $_intImportSuccess = null;   // set on successful ZIP import
 $_intZipConflict   = null;   // set when target exists, needs replace confirmation
 
 // ── POST handlers ──────────────────────────────────────────────────────────────
+
+/**
+ * Parses php.ini size shorthand (8M, 256K, 2G) to bytes.
+ */
+function _int_ini_bytes(string $v): int {
+    $v    = trim($v);
+    $last = strtolower(substr($v, -1));
+    $n    = (int) $v;
+    return match($last) {
+        'g' => $n * 1073741824,
+        'm' => $n * 1048576,
+        'k' => $n * 1024,
+        default => $n,
+    };
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    csrf_verify();
+
+    // ── Detect post_max_size exceeded ──────────────────────────────────────────
+    // When exceeded PHP silently empties $_POST and $_FILES — no upload error,
+    // no action field, handler never runs. Catch it here via CONTENT_LENGTH.
+    $clen        = (int) ($_SERVER['CONTENT_LENGTH'] ?? 0);
+    $postMaxB    = _int_ini_bytes(ini_get('post_max_size'));
+    $uploadMaxB  = _int_ini_bytes(ini_get('upload_max_filesize'));
+    if ($clen > 0 && empty($_POST) && $clen > $postMaxB) {
+        $_intMessages[] = [
+            'type' => 'err',
+            'text' => 'Upload failed: request size (' . integrity_format_bytes($clen) . ') '
+                    . 'exceeds post_max_size (' . ini_get('post_max_size') . '). '
+                    . 'Increase post_max_size (and upload_max_filesize) in php.ini.',
+        ];
+    } else {
+        // ── CSRF check ─────────────────────────────────────────────────────────
+        if (!empty($_POST)) {
+            $submitted = $_POST['csrf_token'] ?? '';
+            if (function_exists('csrf_enabled') && csrf_enabled()) {
+                if (!hash_equals(csrf_token(), $submitted)) {
+                    $_intMessages[] = ['type' => 'err', 'text' => 'Invalid CSRF token. Refresh the page and try again.'];
+                    goto render;
+                }
+            }
+        }
+    }
+
     $postAction = trim($_POST['action'] ?? '');
 
     // ── Create default directory structure ─────────────────────────────────────
@@ -96,15 +138,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $upload = $_FILES['imp_zip'] ?? null;
         $tmpZip = null;
         if (!$upload || $upload['error'] !== UPLOAD_ERR_OK) {
+            $uploadMaxIni = ini_get('upload_max_filesize');
+            $postMaxIni   = ini_get('post_max_size');
             $uploadErrors = [
-                UPLOAD_ERR_INI_SIZE   => 'File exceeds upload_max_filesize.',
-                UPLOAD_ERR_FORM_SIZE  => 'File exceeds MAX_FILE_SIZE.',
-                UPLOAD_ERR_PARTIAL    => 'File was only partially uploaded.',
-                UPLOAD_ERR_NO_FILE    => 'No file was uploaded.',
-                UPLOAD_ERR_NO_TMP_DIR => 'Missing temporary folder.',
-                UPLOAD_ERR_CANT_WRITE => 'Failed to write file to disk.',
+                UPLOAD_ERR_INI_SIZE   => "File exceeds upload_max_filesize ({$uploadMaxIni}). Increase upload_max_filesize and post_max_size ({$postMaxIni}) in php.ini.",
+                UPLOAD_ERR_FORM_SIZE  => 'File exceeds MAX_FILE_SIZE declared in the form.',
+                UPLOAD_ERR_PARTIAL    => 'File was only partially uploaded. Try again.',
+                UPLOAD_ERR_NO_FILE    => 'No file was uploaded. Select a .zip file.',
+                UPLOAD_ERR_NO_TMP_DIR => 'PHP temporary folder is missing. Check sys_temp_dir in php.ini.',
+                UPLOAD_ERR_CANT_WRITE => 'PHP failed to write the uploaded file to disk. Check tmp folder permissions.',
+                UPLOAD_ERR_EXTENSION  => 'A PHP extension blocked the upload.',
             ];
-            $code = $upload['error'] ?? UPLOAD_ERR_NO_FILE;
+            $code = isset($upload['error']) ? (int) $upload['error'] : UPLOAD_ERR_NO_FILE;
             $errors[] = $uploadErrors[$code] ?? 'Upload error code ' . $code . '.';
         } else {
             if (strtolower(pathinfo($upload['name'], PATHINFO_EXTENSION)) !== 'zip') {
@@ -196,7 +241,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         unset($_SESSION['8int_zip'][$token]);
         if ($stored && isset($stored['path'])) @unlink($stored['path']);
     }
+
+    } // end else (post_max_size check)
 }
+render:
 
 /**
  * Core extraction logic — validates ZIP, detects wrapper, creates target, extracts.
@@ -348,6 +396,9 @@ require __DIR__ . '/../../../includes/version.php';
 .int-form-field select:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.18); }
 .int-form-field input[type=file] { padding:6px 8px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:12px; cursor:pointer; }
 .int-hint { font-size:11px; color:#94a3b8; margin-top:6px; }
+.int-php-limits { background:#f8fafc; border:1px solid var(--border); border-radius:6px; padding:10px 12px; margin-top:12px; font-size:11px; color:var(--text-muted); }
+.int-php-limits strong { color:var(--text); }
+.int-php-limits code { font-family:var(--font-mono,monospace); background:var(--surface2); border:1px solid var(--border); border-radius:3px; padding:1px 5px; }
 
 /* ── Integrity check grid ── */
 .int-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 20px; margin-bottom:14px; }
@@ -532,6 +583,27 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
           ZIP entries with path traversal, absolute paths, or symlinks are rejected.
           Wrapper folders (e.g. <code>Joomla_4.4.14/</code>) are stripped automatically.
         </div>
+
+        <?php
+        $uploadMaxIni = ini_get('upload_max_filesize');
+        $postMaxIni   = ini_get('post_max_size');
+        $uploadMaxB   = _int_ini_bytes($uploadMaxIni);
+        $postMaxB     = _int_ini_bytes($postMaxIni);
+        $limitOk      = $uploadMaxB >= 52428800 && $postMaxB >= 52428800; // 50 MB
+        ?>
+        <div class="int-php-limits" style="<?= $limitOk ? '' : 'border-color:#fde68a;background:#fffbeb;' ?>">
+          <strong>PHP upload limits</strong>
+          &nbsp;&middot;&nbsp;
+          <code>upload_max_filesize</code> = <strong style="color:<?= $limitOk ? 'inherit' : '#b45309' ?>"><?= h($uploadMaxIni) ?></strong>
+          &nbsp;&nbsp;
+          <code>post_max_size</code> = <strong style="color:<?= $limitOk ? 'inherit' : '#b45309' ?>"><?= h($postMaxIni) ?></strong>
+          <?php if (!$limitOk): ?>
+          &nbsp;&mdash;&nbsp;
+          <span style="color:#b45309;">These limits may be too low for large packages (Joomla full ZIP ~30 MB).
+          Set both to at least <code>64M</code> in <code>php.ini</code>.</span>
+          <?php endif; ?>
+        </div>
+
       </div>
     </div>
 
