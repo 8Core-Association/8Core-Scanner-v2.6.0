@@ -22,7 +22,7 @@ function integrity_default_tree(): array {
 
 /**
  * Creates the default repository directory tree.
- * Returns array of ['path', 'ok', 'note'].
+ * Returns array of ['path' => string, 'ok' => bool, 'note' => string].
  */
 function integrity_ensure_repo_structure(): array {
     $results = [];

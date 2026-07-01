@@ -24,11 +24,15 @@ if (isset($pdo) && function_exists('scanner_modules_table_exists') && scanner_mo
         if (!file_exists($manifestPath)) continue;
         $manifest = @include $manifestPath;
         if (!is_array($manifest) || empty($manifest['admin_menu'])) continue;
-        foreach ($manifest['admin_menu'] as $item) {
+        // Normalise: support both a single item ['label'=>,'url'=>] and a list of items.
+        $menuItems = $manifest['admin_menu'];
+        if (isset($menuItems['label']) && isset($menuItems['url'])) {
+            $menuItems = [$menuItems];
+        }
+        foreach ($menuItems as $item) {
             if (empty($item['label']) || empty($item['url'])) continue;
             $_sbModuleMenuItems[] = [
                 'label' => $item['label'],
-                // url is relative to admin/ — use as-is
                 'href'  => ltrim($item['url'], '/'),
             ];
         }

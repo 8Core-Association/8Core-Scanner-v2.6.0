@@ -4,9 +4,13 @@
 
 ### Fixed
 
-- `admin/module_integrity.php` — CSS link ispravljen: `../assets/css/scanner.css` (ne vise filesystem `$scannerRoot`)
-- `admin/module_integrity.php` — Odjava link ispravljen: `../logout.php`
-- `module.php` — verzija bumped na `0.1.1`
+- `module.php` — `admin_menu` prepisano kao single-object (ne lista), kompatibilno sa sidebar normalizacijom
+- `admin/module_integrity.php` — verzija u headeru: `v0.1.1`
+- `admin/module_integrity.php` — CSS: `../assets/css/scanner.css` (ne PHP filesystem path)
+- `admin/module_integrity.php` — logout: `../logout.php`
+- `admin/module_integrity.php` — sidebar include: relativan path `../../../admin/sidebar.php`
+- `admin/module_integrity.php` — root komanda prikazuje se kad PHP nema dozvolu (ne silent fail)
+- `includes/integrity.php` — funkcija preimenovana u `integrity_default_tree()` (uskladeno s instaliranim modulom)
 
 ---
 

@@ -1,19 +1,18 @@
 <?php
 /**
- * 8Core Integrity v0.1.0 — Admin: Integrity Manager
+ * 8Core Integrity v0.1.1 — Admin: Integrity Manager
  * (c) 2026 Tomislav Galić <tomislav@8core.hr>
  * Sva prava pridržana.
  *
  * Included by scanner/admin/module.php router.
- * Auth, $pdo, h(), csrf_field(), sidebar.php are available from the router context.
+ * Auth, $pdo, h(), csrf_field() are already bootstrapped by the router.
+ * This file provides its own full HTML page (html/head/body).
  */
 
-// Module root: scanner/modules/8core-integrity/
-$_intModuleRoot = realpath(__DIR__ . '/..');
-require_once $_intModuleRoot . '/includes/integrity.php';
+require_once __DIR__ . '/../includes/integrity.php';
 
 // ── Handle POST ────────────────────────────────────────────────────────────────
-$_intMessages = [];
+$_intMessages    = [];
 $_intShowRootCmd = false;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -21,10 +20,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $postAction = isset($_POST['action']) ? trim($_POST['action']) : '';
 
     if ($postAction === 'create_repo_structure') {
-        $results = integrity_ensure_repo_structure();
+        $results   = integrity_ensure_repo_structure();
         $anyFailed = false;
         foreach ($results as $r) {
-            $_intMessages[] = ['ok' => $r['ok'], 'text' => ($r['ok'] ? 'OK' : 'FAIL') . '  ' . $r['path'] . '  [' . $r['note'] . ']'];
+            $_intMessages[] = [
+                'ok'   => $r['ok'],
+                'text' => ($r['ok'] ? 'OK' : 'FAIL') . '  ' . $r['path'] . '  [' . $r['note'] . ']',
+            ];
             if (!$r['ok']) $anyFailed = true;
         }
         if ($anyFailed) {
@@ -35,9 +37,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $_intRepoRoot    = integrity_repo_root();
 $_intDefaultTree = integrity_default_tree();
+$_intWebUser     = function_exists('posix_getpwuid') ? (posix_getpwuid(posix_geteuid())['name'] ?? 'www-data') : 'www-data';
 
-// Detect scanner web user for the root command hint
-$_intWebUser = function_exists('posix_getpwuid') ? (posix_getpwuid(posix_geteuid())['name'] ?? 'www-data') : 'www-data';
+require __DIR__ . '/../../../includes/version.php';
 ?>
 <!doctype html>
 <html lang="hr">
@@ -82,7 +84,7 @@ $_intWebUser = function_exists('posix_getpwuid') ? (posix_getpwuid(posix_geteuid
   <div class="topbar">
     <div class="topbar-title">8Core Integrity</div>
     <div class="topbar-meta">
-      <span style="font-size:12px;color:var(--text-muted);">v0.1.0</span>
+      <span style="font-size:12px;color:var(--text-muted);">v0.1.1</span>
       &nbsp;&nbsp;<a href="../logout.php" style="color:var(--text-muted);font-size:12px;">Odjava</a>
     </div>
   </div>

@@ -6,6 +6,18 @@ Verzioniranje slijedi [Semantic Versioning](https://semver.org/lang/hr/).
 
 ---
 
+## [2.7.0] — 2026-07-01
+
+### Fixed
+
+- **`admin/sidebar.php`** — normalizacija `admin_menu`: podrska za single-object `['label'=>,'url'=>]` i listu objekata
+- **`admin/sidebar.php`** — sidebar sada prikazuje linkove aktivnih modula na svim admin stranicama
+- **`admin/modules_action.php`** — upload modula koji je vec instaliran automatski azurira `scanner_modules` (name, description, version, updated_at), bez resetiranja `active` stanja
+- **`admin/module.php`** — module router ispravno includea module admin stranicu s punim kontekstom (auth, pdo, helperi, sidebar)
+- **`admin/modules.php`** — Open link za aktivne module s admin_menu
+
+---
+
 ## [2.6.9] — 2026-07-01
 
 ### Fixed

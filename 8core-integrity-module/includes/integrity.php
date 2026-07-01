@@ -1,13 +1,13 @@
 <?php
 /**
- * 8Core Integrity — helper funkcije
+ * 8Core Integrity — helper functions
  */
 
 function integrity_repo_root(): string {
     return '/home/8core_integrity/repo';
 }
 
-function integrity_get_default_tree(): array {
+function integrity_default_tree(): array {
     $root = integrity_repo_root();
     return [
         $root . '/joomla/v3x',
@@ -26,13 +26,13 @@ function integrity_get_default_tree(): array {
  */
 function integrity_ensure_repo_structure(): array {
     $results = [];
-    foreach (integrity_get_default_tree() as $dir) {
+    foreach (integrity_default_tree() as $dir) {
         if (is_dir($dir)) {
             $results[] = ['path' => $dir, 'ok' => true, 'note' => 'already exists'];
             continue;
         }
-        $created = @mkdir($dir, 0755, true);
-        $results[] = ['path' => $dir, 'ok' => $created, 'note' => $created ? 'created' : 'failed'];
+        $created   = @mkdir($dir, 0755, true);
+        $results[] = ['path' => $dir, 'ok' => $created, 'note' => $created ? 'created' : 'failed (permission denied)'];
     }
     return $results;
 }
