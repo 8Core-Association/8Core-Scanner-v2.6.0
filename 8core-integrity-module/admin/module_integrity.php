@@ -164,6 +164,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $postAction = $skipHandlers ? '' : trim($_POST['action'] ?? '');
 
+    // Guard: POST with data but no action — almost always means nested form
+    // ate the submit or a JS error swallowed the action hidden input.
+    if (!$skipHandlers && !empty($_POST) && $postAction === '') {
+        $_intMessages[] = [
+            'type' => 'err',
+            'text' => 'Invalid form submit: action was not received. '
+                    . 'This usually means a form was nested inside another form. '
+                    . 'Clear your browser cache and try again.',
+        ];
+        $skipHandlers = true;
+    }
+
     // ── Create default directory structure ─────────────────────────────────────
     if ($postAction === 'create_repo_structure') {
         $anyFailed = false;
@@ -414,6 +426,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_intCheckOrigin  = trim($_POST['origin_path_manual'] ?? '') ?: trim($_POST['origin_path'] ?? '');
         $_intCheckDest    = trim($_POST['dest_path'] ?? '');
         $_intScanExcl     = trim($_POST['scan_exclusions'] ?? '');
+
+        // Store submit debug info (shown in Check tab after redirect)
+        $_SESSION['8int_check_debug'] = [
+            'action'     => $postAction,
+            'origin'     => $_intCheckOrigin,
+            'dest'       => $_intCheckDest,
+            'excl_count' => $__ec = count(array_filter(explode("\n", $_intScanExcl))),
+            'ts'         => date('H:i:s'),
+        ];
 
         if ($_intCheckOrigin === '' || $_intCheckDest === '') {
             $_intMessages[] = ['type' => 'err', 'text' => 'Both origin and destination paths are required.'];
@@ -909,6 +930,10 @@ foreach (_int_flash_drain() as $fm) {
 // Drain per-result failure details (set by failed trash/replace actions)
 $_intFailDetails = $_SESSION['8int_fail_detail'] ?? [];
 // Do NOT unset here — keep until reset so View error survives filter navigation
+
+// Drain check submit debug (set by run_structural_check handler; shown once then cleared)
+$_intCheckDebug = $_SESSION['8int_check_debug'] ?? null;
+unset($_SESSION['8int_check_debug']);
 
 // In-memory result fallback (no DB)
 if (isset($_GET['inmem']) && isset($_SESSION['8int_inmem'])) {
@@ -1876,6 +1901,18 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
       </div>
       <hr class="int-divider">
       <div class="int-body">
+
+        <?php if ($_intCheckDebug): ?>
+        <div style="margin-bottom:14px;padding:10px 14px;background:#fefce8;border:1px solid #fde047;border-radius:7px;font-size:11px;font-family:monospace;color:#713f12;">
+          <strong style="display:block;margin-bottom:4px;">Submit debug (last run_structural_check received)</strong>
+          <div>Action: <?= h($_intCheckDebug['action']) ?></div>
+          <div>Origin: <?= h($_intCheckDebug['origin'] ?: '<em>empty</em>') ?></div>
+          <div>Destination: <?= h($_intCheckDebug['dest'] ?: '<em>empty</em>') ?></div>
+          <div>Exclusion lines: <?= (int)$_intCheckDebug['excl_count'] ?></div>
+          <div>Time: <?= h($_intCheckDebug['ts']) ?></div>
+        </div>
+        <?php endif; ?>
+
         <form method="post" action="module.php?module=8core-integrity&page=module_integrity&tab=check" id="int-check-form">
           <input type="hidden" name="action" value="run_structural_check">
           <input type="hidden" name="detected_software" id="int-detected-software"
@@ -1987,51 +2024,55 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               Malware scanner runs independently and is NOT affected by these exclusions.
             </div>
 
-            <!-- Save current as new template -->
+            <!-- Save current as new template (toggle button only — form is outside int-check-form below) -->
             <div style="margin-top:8px;">
               <button type="button" class="btn btn-ghost" id="int-excl-save-toggle"
                       style="font-size:11px;padding:4px 10px;">Save current as template&hellip;</button>
             </div>
-            <div class="int-excl-save-form" id="int-excl-save-form">
-              <div class="int-excl-save-form-title">Save exclusions as new template</div>
-              <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
-                <input type="hidden" name="action" value="save_excl_template">
-                <?= csrf_field() ?>
-                <div class="int-excl-save-row">
-                  <div class="int-excl-save-field">
-                    <label>Template name *</label>
-                    <input type="text" name="tpl_name" required placeholder="Joomla 4 production" maxlength="190">
-                  </div>
-                  <div class="int-excl-save-field">
-                    <label>CMS (optional)</label>
-                    <input type="text" name="tpl_cms" placeholder="Joomla" maxlength="100" style="width:120px;">
-                  </div>
-                  <div class="int-excl-save-field">
-                    <label>Description (optional)</label>
-                    <input type="text" name="tpl_desc" placeholder="Short description" maxlength="255" style="width:220px;">
-                  </div>
-                </div>
-                <input type="hidden" name="tpl_paths" id="int-excl-save-paths">
-                <div style="margin-top:10px;display:flex;gap:8px;">
-                  <button type="submit" class="btn btn-primary" style="font-size:12px;padding:6px 14px;"
-                          onclick="document.getElementById('int-excl-save-paths').value=document.getElementById('int-excl-textarea').value;">
-                    Save template
-                  </button>
-                  <button type="button" class="btn btn-ghost" style="font-size:12px;padding:6px 12px;"
-                          onclick="document.getElementById('int-excl-save-form').classList.remove('is-open');">
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            </div>
           </div>
 
-          <div style="margin-top:14px;">
-            <button type="submit" class="btn btn-primary">
-              Run Integrity Check
-            </button>
-          </div>
-        </form>
+        </form><!-- /#int-check-form -->
+
+        <!-- Save-as-template form (outside int-check-form to avoid nested-form breakage) -->
+        <div class="int-excl-save-form" id="int-excl-save-form">
+          <div class="int-excl-save-form-title">Save exclusions as new template</div>
+          <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
+            <input type="hidden" name="action" value="save_excl_template">
+            <?= csrf_field() ?>
+            <div class="int-excl-save-row">
+              <div class="int-excl-save-field">
+                <label>Template name *</label>
+                <input type="text" name="tpl_name" required placeholder="Joomla 4 production" maxlength="190">
+              </div>
+              <div class="int-excl-save-field">
+                <label>CMS (optional)</label>
+                <input type="text" name="tpl_cms" placeholder="Joomla" maxlength="100" style="width:120px;">
+              </div>
+              <div class="int-excl-save-field">
+                <label>Description (optional)</label>
+                <input type="text" name="tpl_desc" placeholder="Short description" maxlength="255" style="width:220px;">
+              </div>
+            </div>
+            <input type="hidden" name="tpl_paths" id="int-excl-save-paths">
+            <div style="margin-top:10px;display:flex;gap:8px;">
+              <button type="submit" class="btn btn-primary" style="font-size:12px;padding:6px 14px;"
+                      onclick="document.getElementById('int-excl-save-paths').value=document.getElementById('int-excl-textarea').value;">
+                Save template
+              </button>
+              <button type="button" class="btn btn-ghost" style="font-size:12px;padding:6px 12px;"
+                      onclick="document.getElementById('int-excl-save-form').classList.remove('is-open');">
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Run button submits int-check-form via form= attribute -->
+        <div style="margin-top:14px;">
+          <button type="submit" form="int-check-form" class="btn btn-primary">
+            Run Integrity Check
+          </button>
+        </div>
         <div class="int-placeholder">
           If the selected origin repository has a hash index, a full hash check (MISSING / MODIFIED / EXTRA) will run automatically. Otherwise a structural (file existence only) check is used.
         </div>
