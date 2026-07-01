@@ -5,7 +5,7 @@
  * Sva prava pridržana.
  */
 require_once __DIR__ . '/../includes/version.php';
-if (!function_exists('scanner_modules_table_exists')) {
+if (!function_exists('scanner_modules_all')) {
     require_once __DIR__ . '/../includes/modules.php';
 }
 

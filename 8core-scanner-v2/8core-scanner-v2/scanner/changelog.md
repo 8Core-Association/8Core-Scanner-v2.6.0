@@ -6,6 +6,20 @@ Verzioniranje slijedi [Semantic Versioning](https://semver.org/lang/hr/).
 
 ---
 
+## [2.6.9] — 2026-07-01
+
+### Fixed
+
+- **`admin/sidebar.php`** — `function_exists` guard ispravljen na `scanner_modules_all`
+  (prethodni guard koristio pogresno ime funkcije sto je moglo sprijeciti ucitavanje modula na nekim stranicama)
+- **`admin/modules_action.php`** — upload akcija sada azurira `scanner_modules` DB zapis
+  (`name`, `description`, `version`, `updated_at`) ako je modul vec instaliran;
+  ranije je samo kopirala fajlove bez azuriranja baze
+- **`admin/sidebar.php`** — sidebar module linkovi prikazuju se ispravno na svim admin stranicama
+- **`admin/module.php`** — module router ukljucuje module admin stranicu s punim kontekstom
+
+---
+
 ## [2.6.8] — 2026-07-01
 
 ### Added

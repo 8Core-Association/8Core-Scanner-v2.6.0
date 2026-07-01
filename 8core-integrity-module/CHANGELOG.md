@@ -1,5 +1,15 @@
 # 8Core Integrity — Changelog
 
+## [0.1.1] — 2026-07-01
+
+### Fixed
+
+- `admin/module_integrity.php` — CSS link ispravljen: `../assets/css/scanner.css` (ne vise filesystem `$scannerRoot`)
+- `admin/module_integrity.php` — Odjava link ispravljen: `../logout.php`
+- `module.php` — verzija bumped na `0.1.1`
+
+---
+
 ## [0.1.0] — 2026-07-01
 
 ### Initial release

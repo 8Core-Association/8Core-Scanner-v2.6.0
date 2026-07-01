@@ -42,7 +42,7 @@ $defaultTree = integrity_get_default_tree();
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>8Core Integrity</title>
-<link rel="stylesheet" href="<?= $scannerRoot ?>/assets/css/scanner.css">
+<link rel="stylesheet" href="../assets/css/scanner.css">
 <style>
 .int-section { background:var(--surface); border:1px solid var(--border); border-radius:10px; margin-bottom:18px; }
 .int-section-header { padding:16px 20px 0; display:flex; align-items:center; gap:10px; }
@@ -77,7 +77,7 @@ $defaultTree = integrity_get_default_tree();
     <div class="topbar-title">8Core Integrity</div>
     <div class="topbar-meta">
       <span style="font-size:12px;color:var(--text-muted);">v0.1.0</span>
-      &nbsp;&nbsp;<a href="<?= $scannerRoot ?>/logout.php" style="color:var(--text-muted);font-size:12px;">Odjava</a>
+      &nbsp;&nbsp;<a href="../logout.php" style="color:var(--text-muted);font-size:12px;">Odjava</a>
     </div>
   </div>
 
