@@ -6,6 +6,30 @@ Verzioniranje slijedi [Semantic Versioning](https://semver.org/lang/hr/).
 
 ---
 
+## [2.6.4] — 2026-07-01
+
+### Added
+
+- **`install/migrations/20260701_005_add_scanner_modules.sql`** — nova tablica `scanner_modules`:
+  - Polja: `id`, `module_key` (UNIQUE), `name`, `description`, `version`, `active`, `installed_at`, `updated_at`
+- **`includes/modules.php`** — helper funkcije za module manager:
+  - `scanner_modules_table_exists()` — graceful provjera postoji li tablica
+  - `scanner_modules_all()` — dohvat svih modula
+  - `scanner_module_get()` — dohvat jednog modula po `module_key`
+  - `scanner_module_install()` — INSERT/UPDATE modula (upsert)
+  - `scanner_module_set_active()` — aktivacija/deaktivacija modula
+  - `scanner_module_is_active()` — provjera je li modul aktivan
+- **`admin/modules.php`** — učitava helper i prikazuje status tablice:
+  - Ako tablica postoji: "Module manager will be available in the next update."
+  - Ako tablica ne postoji: uputa za primjenu migracija uz link na Admin Update
+
+### Not changed
+
+- Install/enable/disable UI gumbi planirani za sljedeći update
+- Nema Prescan modula, nema modules_action.php, nema modules foldera
+
+---
+
 ## [2.6.3] — 2026-07-01
 
 ### Added

@@ -1,12 +1,15 @@
 <?php
 /**
- * 8Core Scanner v2.6.3 — Admin: Modules
+ * 8Core Scanner v2.6.4 — Admin: Modules
  * (c) 2026 Tomislav Galić <tomislav@8core.hr>
  * Sva prava pridržana.
  */
 require __DIR__ . '/../includes/auth.php';
 require __DIR__ . '/../includes/helpers.php';
+require __DIR__ . '/../includes/modules.php';
 require_admin();
+
+$tableReady = scanner_modules_table_exists($pdo);
 ?>
 <!doctype html>
 <html lang="hr">
@@ -33,7 +36,11 @@ require_admin();
 
   <div class="content">
     <div class="panel">
-      <p style="color:var(--text-muted);margin:0;">Module manager will be available after database update.</p>
+      <?php if ($tableReady): ?>
+        <p style="color:var(--text-muted);margin:0;">Module manager will be available in the next update.</p>
+      <?php else: ?>
+        <p style="color:var(--text-muted);margin:0;">Module manager will be available after database update. Please apply pending migrations in <a href="update.php">Admin &rarr; Update</a>.</p>
+      <?php endif; ?>
     </div>
   </div>
 </div>
