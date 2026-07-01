@@ -1,14 +1,38 @@
 <?php
 /**
- * 8Core Scanner v2.6.0 — Admin sidebar
+ * 8Core Scanner v2.6.7 — Admin sidebar
  * (c) 2026 Tomislav Galić <tomislav@8core.hr>
  * Sva prava pridržana.
  */
 require_once __DIR__ . '/../includes/version.php';
+if (function_exists('scanner_modules_table_exists')) {
+    require_once __DIR__ . '/../includes/modules.php';
+}
+
 $currentFile = basename($_SERVER['PHP_SELF']);
 function sb_active($file) {
     global $currentFile;
     return $currentFile === $file ? ' active' : '';
+}
+
+// Collect admin_menu entries from active installed modules.
+$_sbModuleMenuItems = [];
+if (isset($pdo) && function_exists('scanner_modules_table_exists') && scanner_modules_table_exists($pdo)) {
+    foreach (scanner_modules_all($pdo) as $mod) {
+        if (!(int)$mod['active']) continue;
+        $manifestPath = __DIR__ . '/../modules/' . $mod['module_key'] . '/module.php';
+        if (!file_exists($manifestPath)) continue;
+        $manifest = @include $manifestPath;
+        if (!is_array($manifest) || empty($manifest['admin_menu'])) continue;
+        foreach ($manifest['admin_menu'] as $item) {
+            if (empty($item['label']) || empty($item['url'])) continue;
+            $_sbModuleMenuItems[] = [
+                'label' => $item['label'],
+                // url is relative to scanner/ root
+                'href'  => '../' . ltrim($item['url'], '/'),
+            ];
+        }
+    }
 }
 ?>
 <aside class="sidebar">
@@ -77,6 +101,13 @@ function sb_active($file) {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="9" height="9" rx="1"/><rect x="13" y="2" width="9" height="9" rx="1"/><rect x="2" y="13" width="9" height="9" rx="1"/><path d="M13 17h4m-2-2v4"/></svg>
       Modules
     </a>
+
+    <?php foreach ($_sbModuleMenuItems as $_sbItem): ?>
+    <a class="sidebar-link" href="<?= htmlspecialchars($_sbItem['href'], ENT_QUOTES, 'UTF-8') ?>">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      <?= htmlspecialchars($_sbItem['label'], ENT_QUOTES, 'UTF-8') ?>
+    </a>
+    <?php endforeach; ?>
 
     <div class="sidebar-section-label" style="margin-top:14px;">Sustav</div>
 

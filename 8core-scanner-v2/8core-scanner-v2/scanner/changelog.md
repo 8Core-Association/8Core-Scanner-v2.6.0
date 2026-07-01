@@ -6,6 +6,32 @@ Verzioniranje slijedi [Semantic Versioning](https://semver.org/lang/hr/).
 
 ---
 
+## [2.6.7] — 2026-07-01
+
+### Added
+
+- **`admin/sidebar.php`** — dinamicki module linkovi:
+  - Za svaki `active` modul u `scanner_modules`, ucitava manifest iz `modules/<key>/module.php`
+  - Iz `admin_menu` sekcije manifesta generira sidebar linkove ispod "Modules" sekcije
+  - Ako je modul disabled ili manifest ne postoji, link se ne prikazuje
+  - Graceful fallback: ako `scanner_modules` tablica ne postoji, sekcija je prazna
+
+### Module: 8Core Integrity v0.1.0
+
+Development paket: `8core-integrity-module/`
+
+- `module.php` — manifest (`module_key: 8core-integrity`, `admin_menu: Integrity`)
+- `admin/module_integrity.php` — admin UI:
+  - **Repository Manager**: prikaz repo root patha, default tree, "Create repository structure" gumb
+  - **Integrity Check**: origin/destination forma s placeholder porukom
+- `includes/integrity.php` — helper funkcije:
+  - `integrity_repo_root()`, `integrity_get_default_tree()`, `integrity_ensure_repo_structure()`
+- `README.md`, `CHANGELOG.md`
+
+Instalacija: zapakiraj `8core-integrity-module/` kao ZIP, uploadaj kroz Module Manager.
+
+---
+
 ## [2.6.6] — 2026-07-01
 
 ### Added
