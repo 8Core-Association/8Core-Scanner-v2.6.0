@@ -69,15 +69,16 @@ foreach ($discoveredModules as $key => $info) {
 .mod-table th { text-align:left; padding:8px 16px; font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; border-bottom:1px solid var(--border); }
 .mod-table td { padding:10px 16px; border-bottom:1px solid var(--bg); vertical-align:middle; }
 .mod-table tr:last-child td { border-bottom:none; }
-.mod-table code { font-size:11px; background:var(--bg); padding:2px 6px; border-radius:4px; font-family:var(--font-mono,monospace); }
+.mod-table code { font-size:11px; background:var(--surface2); color:var(--text); border:1px solid var(--border); padding:2px 6px; border-radius:4px; font-family:var(--font-mono,monospace); }
 .mod-desc { color:var(--text-muted); font-size:12px; }
 .upload-form { padding:16px 20px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
 .upload-hint { padding:0 20px 16px; font-size:12px; color:var(--text-muted); }
 .flash-ok  { border-color:#22c55e; }
 .flash-err { border-color:#ef4444; }
-.dbg-row td { font-size:11px; color:var(--text-muted); background:var(--bg); padding:4px 16px; border-bottom:1px solid var(--border); }
-.dbg-ok  { color:#4ade80; font-weight:700; }
-.dbg-err { color:#f87171; font-weight:700; }
+.dbg-row td { font-size:11px; color:#334155; background:#f1f5f9; padding:6px 16px; border-bottom:1px solid var(--border); }
+.dbg-row code { background:#e2e8f0; color:#0f172a; border:none; font-size:11px; padding:1px 5px; border-radius:3px; }
+.dbg-ok  { color:#16a34a; font-weight:700; }
+.dbg-err { color:#dc2626; font-weight:700; }
 </style>
 </head>
 <body>
@@ -255,6 +256,13 @@ foreach ($discoveredModules as $key => $info) {
                     <input type="hidden" name="action" value="enable">
                     <button type="submit" class="btn btn-primary" style="font-size:12px;">Enable</button>
                   <?php endif; ?>
+                </form>
+                <form method="post" action="modules_action.php" style="display:inline;"
+                      onsubmit="return confirm('Ukloniti modul <?= h(addslashes($mod['name'])) ?>? Ova radnja briše fajlove i DB zapis.');">
+                  <?= csrf_field() ?>
+                  <input type="hidden" name="action" value="remove">
+                  <input type="hidden" name="module_key" value="<?= h($mod['module_key']) ?>">
+                  <button type="submit" class="btn btn-ghost" style="font-size:12px;color:#dc2626;border-color:#fca5a5;">Ukloni</button>
                 </form>
               </td>
             </tr>

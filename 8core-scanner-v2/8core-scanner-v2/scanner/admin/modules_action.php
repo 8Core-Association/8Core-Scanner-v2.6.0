@@ -286,6 +286,45 @@ if ($action === 'install') {
     mod_redirect();
 }
 
+// ── ACTION: remove — delete module files + DB record ──────────────────────────
+if ($action === 'remove') {
+    $moduleKey = isset($_POST['module_key']) ? trim($_POST['module_key']) : '';
+
+    if (!valid_module_key($moduleKey)) {
+        mod_flash('Neispravan module_key.', 'error');
+        mod_redirect();
+    }
+
+    if (!scanner_modules_table_exists($pdo)) {
+        mod_flash('Tablica scanner_modules ne postoji.', 'error');
+        mod_redirect();
+    }
+
+    $mod = scanner_module_get($pdo, $moduleKey);
+    if (!$mod) {
+        mod_flash('Modul "' . htmlspecialchars($moduleKey, ENT_QUOTES, 'UTF-8') . '" nije pronađen.', 'error');
+        mod_redirect();
+    }
+
+    // Delete files from modules/
+    $moduleDir = $modulesBaseDir . '/' . $moduleKey;
+    $resolvedBase = realpath($modulesBaseDir);
+    if ($resolvedBase && is_dir($moduleDir)) {
+        $resolvedDir = realpath($moduleDir);
+        // Path traversal guard
+        if ($resolvedDir && strpos($resolvedDir, $resolvedBase . '/') === 0) {
+            rmdir_recursive($moduleDir);
+        }
+    }
+
+    // Delete DB record
+    $st = $pdo->prepare("DELETE FROM scanner_modules WHERE module_key = ?");
+    $st->execute([$moduleKey]);
+
+    mod_flash('Modul "' . htmlspecialchars($mod['name'], ENT_QUOTES, 'UTF-8') . '" uklonjen.');
+    mod_redirect();
+}
+
 // ── ACTION: enable / disable ───────────────────────────────────────────────────
 if (in_array($action, ['enable', 'disable'], true)) {
     $moduleKey = isset($_POST['module_key']) ? trim($_POST['module_key']) : '';

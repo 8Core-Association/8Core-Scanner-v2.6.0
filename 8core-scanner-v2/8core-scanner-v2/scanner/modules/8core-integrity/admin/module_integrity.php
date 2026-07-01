@@ -54,24 +54,25 @@ require __DIR__ . '/../../../includes/version.php';
 .int-section-header h3 { margin:0; font-size:13px; font-weight:700; color:var(--text); }
 .int-divider { border:none; border-top:1px solid var(--border); margin:12px 0 0; }
 .int-body { padding:16px 20px; }
-.int-repo-path { font-family:var(--font-mono,monospace); font-size:13px; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px 12px; color:var(--text); display:inline-block; margin-bottom:14px; word-break:break-all; }
+.int-repo-path { font-family:var(--font-mono,monospace); font-size:13px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:8px 12px; color:var(--text); display:inline-block; margin-bottom:14px; word-break:break-all; }
 .int-tree { margin:0 0 14px; padding:0 0 0 8px; list-style:none; }
 .int-tree li { font-family:var(--font-mono,monospace); font-size:12px; color:var(--text-muted); padding:2px 0; }
 .int-tree li::before { content:'├─ '; color:var(--border); }
 .int-tree li:last-child::before { content:'└─ '; color:var(--border); }
 .msg-list { list-style:none; margin:0 0 12px; padding:0; }
-.msg-list li { font-family:var(--font-mono,monospace); font-size:12px; padding:3px 0; border-bottom:1px solid var(--bg); }
+.msg-list li { font-family:var(--font-mono,monospace); font-size:12px; padding:3px 0; border-bottom:1px solid var(--border); }
 .msg-list li:last-child { border-bottom:none; }
-.msg-ok  { color:#4ade80; }
-.msg-err { color:#f87171; }
-.int-root-cmd { background:#020617; border:1px solid #1e293b; border-radius:8px; padding:14px 16px; margin-top:12px; }
-.int-root-cmd p { margin:0 0 8px; font-size:12px; color:#fbbf24; font-weight:600; }
-.int-root-cmd pre { margin:0; font-family:var(--font-mono,monospace); font-size:12px; color:#86efac; white-space:pre-wrap; word-break:break-all; line-height:1.6; }
+.msg-ok  { color:#16a34a; }
+.msg-err { color:#dc2626; }
+.int-root-cmd { background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:14px 16px; margin-top:12px; }
+.int-root-cmd p { margin:0 0 8px; font-size:12px; color:#92400e; font-weight:600; }
+.int-root-cmd pre { margin:0; font-family:var(--font-mono,monospace); font-size:12px; color:#166534; background:#dcfce7; border-radius:6px; padding:10px 12px; white-space:pre-wrap; word-break:break-all; line-height:1.6; }
 .int-form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 20px; margin-bottom:14px; }
 .int-field label { display:block; font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px; }
-.int-field input[type=text] { width:100%; padding:8px 10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--font-mono,monospace); font-size:13px; outline:none; box-sizing:border-box; transition:border-color .13s; }
+.int-field input[type=text] { width:100%; padding:8px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--font-mono,monospace); font-size:13px; outline:none; box-sizing:border-box; transition:border-color .13s; }
+.int-field input[type=text]::placeholder { color:#94a3b8; }
 .int-field input[type=text]:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.18); }
-.int-placeholder { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:14px 16px; font-size:13px; color:var(--text-muted); margin-top:12px; }
+.int-placeholder { background:var(--surface2); border:1px solid var(--border); border-radius:6px; padding:14px 16px; font-size:13px; color:var(--text-muted); margin-top:12px; }
 @media (max-width:640px) { .int-form-grid { grid-template-columns:1fr; } }
 </style>
 </head>
