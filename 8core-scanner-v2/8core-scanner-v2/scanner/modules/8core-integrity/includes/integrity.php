@@ -1238,18 +1238,18 @@ function integrity_load_run(PDO $pdo, int $runId): ?array {
 
 /**
  * Loads results for a run with optional filters.
- * $filters keys: type, severity, status, path (substring match on relative_path).
+ * $filters keys: type, severity, status, path (substring match on relative_path), ids, all_runs.
  */
 function integrity_load_results(PDO $pdo, int $runId, array $filters = []): array {
     try {
         $allRuns = !empty($filters['all_runs']);
         $where   = [];
-        $params  = [];
+        $params  = [];   // always positional — no named params to avoid PDO mixed-param errors
 
-        // run_id scope (skip when all_runs + id filter is used)
+        // run_id scope (skip when all_runs mode is active)
         if ($runId > 0 && !$allRuns) {
-            $where[]        = 'run_id = :run';
-            $params[':run'] = $runId;
+            $where[]  = 'run_id = ?';
+            $params[] = $runId;
         }
 
         // ID filter — parse "1,5,10-20,33" syntax
@@ -1272,35 +1272,33 @@ function integrity_load_results(PDO $pdo, int $runId, array $filters = []): arra
             }
             $idList = array_values(array_unique($idList));
         }
-
         if (!empty($idList)) {
-            $ph      = implode(',', array_fill(0, count($idList), '?'));
-            $where[] = 'id IN (' . $ph . ')';
+            $where[] = 'id IN (' . implode(',', array_fill(0, count($idList), '?')) . ')';
             foreach ($idList as $idVal) $params[] = $idVal;
         }
 
         if (!empty($filters['type'])) {
-            $where[] = 'type = :ft';
-            $params[':ft'] = $filters['type'];
+            $where[]  = 'type = ?';
+            $params[] = $filters['type'];
         }
         if (!empty($filters['severity'])) {
-            $where[] = 'severity = :fs';
-            $params[':fs'] = $filters['severity'];
+            $where[]  = 'severity = ?';
+            $params[] = $filters['severity'];
         }
         if (!empty($filters['status'])) {
-            $where[] = 'status = :fst';
-            $params[':fst'] = $filters['status'];
+            $where[]  = 'status = ?';
+            $params[] = $filters['status'];
         }
         if (!empty($filters['path'])) {
-            $where[] = 'relative_path LIKE :fp';
-            $params[':fp'] = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $filters['path']) . '%';
+            $where[]  = 'relative_path LIKE ?';
+            $params[] = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $filters['path']) . '%';
         }
 
         $whereClause = empty($where) ? '1' : implode(' AND ', $where);
         $sql  = 'SELECT * FROM scanner_integrity_results WHERE ' . $whereClause
               . ' ORDER BY FIELD(severity,\'suspicious\',\'warning\',\'info\'), relative_path ASC';
         $stmt = $pdo->prepare($sql);
-        $stmt->execute(array_values($params));
+        $stmt->execute($params);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     } catch (PDOException $e) {
         return [];
