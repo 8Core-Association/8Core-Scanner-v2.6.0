@@ -898,6 +898,8 @@ $_intTplManageId      = (int) ($_GET['tpl_edit'] ?? 0);
 $_intTplManageData    = ($_intTplManageId > 0) ? integrity_load_exclusion_template($pdo, $_intTplManageId) : null;
 // Whether to scroll Repo tab to template section
 $_intShowTplSection   = isset($_GET['tpl_section']);
+// Whether to show the Create new template form
+$_intTplNew           = isset($_GET['tpl_new']) && !$_intTplManageData;
 
 // Drain flash messages
 foreach (_int_flash_drain() as $fm) {
@@ -1702,9 +1704,12 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
     <div class="int-section" id="int-tpl-section"<?= $_intShowTplSection ? '' : '' ?>>
       <div class="int-section-header" style="justify-content:space-between;">
         <h3>Exclusion Templates</h3>
-        <?php if ($_intTplManageData): ?>
+        <?php if ($_intTplManageData || $_intTplNew): ?>
         <a href="module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1"
            class="btn btn-ghost" style="font-size:11px;padding:4px 10px;">&larr; Back to list</a>
+        <?php else: ?>
+        <a href="module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1&tpl_new=1"
+           class="btn btn-primary" style="font-size:11px;padding:4px 10px;">+ Add new template</a>
         <?php endif; ?>
       </div>
       <hr class="int-divider">
@@ -1740,6 +1745,38 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
             <textarea name="tpl_paths" class="int-tpl-edit-paths"><?= h(implode("\n", $__ted['paths'])) ?></textarea>
             <div style="display:flex;gap:8px;">
               <button type="submit" class="btn btn-primary" style="font-size:12px;">Save changes</button>
+              <a href="module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1"
+                 class="btn btn-ghost" style="font-size:12px;">Cancel</a>
+            </div>
+          </form>
+        </div>
+
+        <?php else: ?>
+        <!-- ── Create new template ── -->
+        <?php if ($_intTplNew): ?>
+        <div class="int-tpl-edit-box">
+          <div class="int-tpl-edit-title">Create new template</div>
+          <form method="post" action="module.php?module=8core-integrity&page=module_integrity">
+            <input type="hidden" name="action" value="save_excl_template">
+            <?= csrf_field() ?>
+            <div class="int-tpl-edit-grid">
+              <div>
+                <label>Name *</label>
+                <input type="text" name="tpl_name" required maxlength="190" placeholder="e.g. WordPress production">
+              </div>
+              <div>
+                <label>Description</label>
+                <input type="text" name="tpl_desc" maxlength="255" placeholder="Optional description">
+              </div>
+              <div>
+                <label>CMS</label>
+                <input type="text" name="tpl_cms" maxlength="100" placeholder="e.g. WordPress, Joomla">
+              </div>
+            </div>
+            <label style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);display:block;margin-bottom:4px;">Paths (one per line)</label>
+            <textarea name="tpl_paths" class="int-tpl-edit-paths" placeholder="wp-content/uploads/&#10;wp-content/cache/&#10;wp-content/plugins/"></textarea>
+            <div style="display:flex;gap:8px;">
+              <button type="submit" class="btn btn-primary" style="font-size:12px;">Create template</button>
               <a href="module.php?module=8core-integrity&page=module_integrity&tab=repo&tpl_section=1"
                  class="btn btn-ghost" style="font-size:12px;">Cancel</a>
             </div>
@@ -1818,8 +1855,9 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
             </tbody>
           </table>
         </div>
-        <?php endif; ?>
-        <?php endif; ?>
+        <?php endif; // end template list ?>
+        <?php endif; // end tpl_new else ?>
+        <?php endif; // end edit vs create/list ?>
 
       </div>
     </div>
