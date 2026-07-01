@@ -1,6 +1,39 @@
 # 8Core Integrity — Changelog
 
-## [0.6.0] — 2026-07-01
+## [0.7.0] — 2026-07-01
+
+### Added
+
+- `install/migrations/20260701_008_alter_integrity_runs_add_exclusions.sql`: adds `scan_exclusions TEXT NULL` column to `scanner_integrity_runs`
+- `includes/integrity.php` — `integrity_path_is_ignored(string $rel, array $storedPaths): bool`: unified ignore matching — trailing `/` = prefix/subtree match; no trailing slash = exact match
+- `includes/integrity.php` — `integrity_parse_scan_exclusions(string $text, string $destRoot): array`: parses admin textarea into normalized prefix-exclusion strings; strips absolute paths to relative; rejects path traversal, backslash, paths outside destRoot; all output entries end with `/`
+- `includes/integrity.php` — `integrity_ensure_tables()` now also runs `ALTER TABLE ... ADD COLUMN scan_exclusions` for existing databases (try/catch safe)
+- `admin/module_integrity.php` — **Scan exclusions** section: textarea in Integrity Check form (above Run button); one path per line; relative or absolute (auto-stripped); clear label distinguishing it from result filters
+- `admin/module_integrity.php` — Pre-run exclusions are parsed + merged with DB persistent ignores before structural check runs
+- `admin/module_integrity.php` — Scan exclusions stored per run in `scanner_integrity_runs.scan_exclusions`; displayed as tags in the run info bar
+- `admin/module_integrity.php` — `_int_ignore_options(string $relPath): array`: computes up to 4 ignore options for a finding (exact path + up to 3 parent prefix levels)
+- `admin/module_integrity.php` — Row "Ignore" action now uses a select+button combo: admin chooses exact path or subtree prefix before submitting
+- `admin/module_integrity.php` — `action_result` ignore handler parses `ignore_path` as `exact:path` or `prefix:path/`; stores subtree ignores with trailing `/` in `scanner_integrity_ignores`
+- `admin/module_integrity.php` — Bulk action dropdown: added "Replace missing from Origin (MISSING only)"
+- `admin/module_integrity.php` — `bulk_preview`: shows skipped-item count + reason when selection contains ineligible rows (wrong type, already actioned)
+- `admin/module_integrity.php` — `bulk_execute`: supports `replace_missing` action
+- `admin/module_integrity.php` — Filter bar labeled "Result filters" with explanatory subtext clearly distinguishing it from scan exclusions
+- `admin/module_integrity.php` — Replace button tooltip: "Copy missing file/folder from origin repository to destination."
+
+### Changed
+
+- `includes/integrity.php` — `integrity_structural_check()`: replaces `isset($ignoredSet[$rel])` exact-only check with `integrity_path_is_ignored()` (prefix + exact); `$ignoredPaths` now supports trailing-slash prefix entries
+- `includes/integrity.php` — `integrity_save_run()`: accepts `array $scanExclusions = []` parameter; stored as newline-delimited string
+- `admin/module_integrity.php` — `run_structural_check` handler: parses pre-run exclusions, merges with DB ignores, passes combined to structural check; passes exclusions to `integrity_save_run()`
+- `module.php` — version bumped to `0.7.0`
+
+### Not implemented (planned)
+
+- Hash comparison (file content integrity)
+- Malware scan integration
+- Scanner worker integration
+
+
 
 ### Added
 

@@ -550,10 +550,84 @@ function integrity_ensure_tables(PDO $pdo): bool {
                KEY `idx_type`     (`type`)
              ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
         );
+        // Add scan_exclusions column if table was created by an older migration.
+        try {
+            $pdo->exec("ALTER TABLE `scanner_integrity_runs` ADD COLUMN `scan_exclusions` TEXT NULL AFTER `info`");
+        } catch (PDOException $e) { /* column already exists */ }
+
         return true;
     } catch (PDOException $e) {
         return false;
     }
+}
+
+// ── Ignore path matching ───────────────────────────────────────────────────────
+
+/**
+ * Returns true if a relative path should be ignored.
+ *
+ * Matching rules (per stored path):
+ *   - Trailing '/'  → prefix match: rel == prefix OR rel starts with prefix + '/'
+ *   - No trailing / → exact match: rel == stored
+ *
+ * This covers both post-run exact ignores (no trailing /) and
+ * pre-run scan exclusions / subtree ignores (trailing /).
+ */
+function integrity_path_is_ignored(string $rel, array $storedPaths): bool {
+    foreach ($storedPaths as $stored) {
+        if ($stored === '') continue;
+        if (substr($stored, -1) === '/') {
+            $prefix = rtrim($stored, '/');
+            if ($rel === $prefix || str_starts_with($rel, $prefix . '/')) return true;
+        } else {
+            if ($rel === $stored) return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Parses a textarea of paths (one per line) into normalized scan exclusion strings.
+ *
+ * Rules:
+ *   - Absolute paths inside $destRoot are stripped to relative form.
+ *   - Absolute paths outside $destRoot are rejected.
+ *   - Path traversal, backslash, null bytes are rejected.
+ *   - All output entries end with '/' (prefix matching convention).
+ *
+ * @return string[]
+ */
+function integrity_parse_scan_exclusions(string $text, string $destRoot): array {
+    $realDest = rtrim(realpath($destRoot) ?: $destRoot, '/');
+    $rules    = [];
+
+    foreach (explode("\n", str_replace("\r", "\n", $text)) as $line) {
+        $line = trim($line);
+        if ($line === '') continue;
+        // Reject unsafe chars
+        if (str_contains($line, '\\') || str_contains($line, "\0")) continue;
+        // Normalize absolute to relative
+        if (str_starts_with($line, '/')) {
+            $stripped = rtrim($line, '/');
+            if ($realDest !== '' && str_starts_with($stripped, $realDest . '/')) {
+                $line = substr($stripped, strlen($realDest) + 1);
+            } elseif ($stripped === $realDest) {
+                continue; // trying to exclude the root itself
+            } else {
+                continue; // outside destRoot
+            }
+        }
+        $line = ltrim($line, '/');
+        if ($line === '') continue;
+        // Reject traversal
+        foreach (explode('/', $line) as $seg) {
+            if ($seg === '..') continue 2;
+        }
+        // Normalize to trailing slash (prefix convention)
+        $rules[] = rtrim($line, '/') . '/';
+    }
+
+    return array_values(array_unique($rules));
 }
 
 /**
@@ -705,7 +779,6 @@ function integrity_structural_check(
     }
 
     $ucFolders  = integrity_user_content_folders($software);
-    $ignoredSet = array_flip($ignoredPaths);
     $maxItems   = 20000;
     $truncated  = false;
 
@@ -726,7 +799,7 @@ function integrity_structural_check(
     // Missing: in origin, not in destination
     foreach ($originItems as $item) {
         $rel = $item['rel'];
-        if (isset($ignoredSet[$rel])) continue;
+        if (integrity_path_is_ignored($rel, $ignoredPaths)) continue;
         if (!isset($destSet[$rel])) {
             $type = $item['is_dir'] ? 'MISSING_DIRECTORY' : 'MISSING_FILE';
             $findings[]       = ['type' => $type, 'rel' => $rel,
@@ -742,7 +815,7 @@ function integrity_structural_check(
     // Extra: in destination, not in origin
     foreach ($destItems as $item) {
         $rel = $item['rel'];
-        if (isset($ignoredSet[$rel])) continue;
+        if (integrity_path_is_ignored($rel, $ignoredPaths)) continue;
         if ($item['is_user_content']) continue;
         if (isset($originSet[$rel]))  continue;
 
@@ -776,13 +849,14 @@ function integrity_structural_check(
 
 /**
  * Saves a structural check run to DB. Returns run_id on success, 0 on error.
+ * $scanExclusions: array of normalized exclusion strings (trailing-slash prefix form).
  */
-function integrity_save_run(PDO $pdo, string $origin, string $dest, string $software, array $counts): int {
+function integrity_save_run(PDO $pdo, string $origin, string $dest, string $software, array $counts, array $scanExclusions = []): int {
     try {
         $stmt = $pdo->prepare(
             'INSERT INTO scanner_integrity_runs
-               (origin_path, destination_path, software, total, suspicious, warnings, info, created_at)
-             VALUES (:o, :d, :s, :total, :susp, :warn, :info, NOW())'
+               (origin_path, destination_path, software, total, suspicious, warnings, info, scan_exclusions, created_at)
+             VALUES (:o, :d, :s, :total, :susp, :warn, :info, :excl, NOW())'
         );
         $stmt->execute([
             ':o'     => $origin,
@@ -792,6 +866,7 @@ function integrity_save_run(PDO $pdo, string $origin, string $dest, string $soft
             ':susp'  => $counts['suspicious'] ?? 0,
             ':warn'  => $counts['warning']    ?? 0,
             ':info'  => $counts['info']       ?? 0,
+            ':excl'  => !empty($scanExclusions) ? implode("\n", $scanExclusions) : null,
         ]);
         return (int) $pdo->lastInsertId();
     } catch (PDOException $e) {

@@ -29,6 +29,7 @@ $_intBulkConfirm  = null;   // bulk preview data before destructive execute
 $_intCheckOrigin  = '';
 $_intCheckDest    = '';
 $_intDetSoftware  = '';     // detected software name (passed through forms)
+$_intScanExcl     = '';     // raw textarea text for scan exclusions (repopulated on error)
 
 // ── Flash message helpers ──────────────────────────────────────────────────────
 
@@ -89,6 +90,29 @@ function _int_parse_id_range(string $input, int $maxId = 9999999): array {
         }
     }
     return array_values(array_unique(array_filter($ids, fn($id) => $id >= 1 && $id <= $maxId)));
+}
+
+/**
+ * Returns ignore options for a result row's relative path.
+ * Each option: ['label' => string, 'value' => 'exact:path' or 'prefix:path/'].
+ * Up to 4 options: exact + up to 3 parent prefix levels.
+ */
+function _int_ignore_options(string $relPath): array {
+    $relPath = trim($relPath, '/');
+    $parts   = array_filter(explode('/', $relPath), fn($p) => $p !== '');
+    $opts    = [];
+
+    // Exact path
+    $opts[] = ['label' => basename($relPath), 'value' => 'exact:' . $relPath];
+
+    // Parent prefix levels (bottom-up, up to 3)
+    for ($depth = count($parts) - 1; $depth >= 1 && count($opts) < 4; $depth--) {
+        $prefix    = implode('/', array_slice($parts, 0, $depth)) . '/';
+        $leafLabel = array_slice($parts, 0, $depth)[count(array_slice($parts, 0, $depth)) - 1] . '/';
+        $opts[] = ['label' => 'Subtree: ' . $leafLabel, 'value' => 'prefix:' . $prefix];
+    }
+
+    return $opts;
 }
 
 // ── POST handlers ──────────────────────────────────────────────────────────────
@@ -321,27 +345,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_intDetSoftware  = trim($_POST['detected_software'] ?? '');
         $_intCheckOrigin  = trim($_POST['origin_path_manual'] ?? '') ?: trim($_POST['origin_path'] ?? '');
         $_intCheckDest    = trim($_POST['dest_path'] ?? '');
+        $_intScanExcl     = trim($_POST['scan_exclusions'] ?? '');
 
         if ($_intCheckOrigin === '' || $_intCheckDest === '') {
             $_intMessages[] = ['type' => 'err', 'text' => 'Both origin and destination paths are required.'];
         } else {
-            $ignores = integrity_ignores_for($pdo, $_intCheckOrigin, $_intCheckDest);
-            $result  = integrity_structural_check($_intCheckOrigin, $_intCheckDest, $_intDetSoftware, $ignores);
+            // Parse and normalize pre-run exclusions
+            $preRunExclusions = integrity_parse_scan_exclusions($_intScanExcl, $_intCheckDest);
+            // Load persistent post-run ignores from DB (exact paths)
+            $dbIgnores = integrity_ignores_for($pdo, $_intCheckOrigin, $_intCheckDest);
+            // Merge: pre-run exclusions (prefix/) + DB exact ignores
+            $combinedIgnores = array_merge($preRunExclusions, $dbIgnores);
+
+            $result = integrity_structural_check($_intCheckOrigin, $_intCheckDest, $_intDetSoftware, $combinedIgnores);
             if (!$result['ok']) {
                 $_intMessages[] = ['type' => 'err', 'text' => 'Check failed: ' . $result['error']];
             } else {
-                $runId = integrity_save_run($pdo, $result['origin'], $result['dest'], $_intDetSoftware, $result['counts']);
+                $runId = integrity_save_run($pdo, $result['origin'], $result['dest'], $_intDetSoftware, $result['counts'], $preRunExclusions);
                 if ($runId > 0) {
                     integrity_save_results($pdo, $runId, $result['origin'], $result['dest'], $result['findings']);
                     _int_flash_set('ok', 'Structural check complete. '
-                        . count($result['findings']) . ' finding(s) found.');
+                        . count($result['findings']) . ' finding(s) found'
+                        . (!empty($preRunExclusions) ? ' (' . count($preRunExclusions) . ' exclusion(s) applied)' : '')
+                        . '.');
                     header('Location: ' . _int_build_check_url($runId));
                     exit;
                 }
-                // DB save failed — render results in-memory without PRG
+                // DB save failed — show in-memory
                 $_intMessages[] = ['type' => 'warn', 'text' => 'Results could not be saved to database. Showing in-memory results.'];
-                // Store in session for single render
-                $_SESSION['8int_inmem'] = $result;
+                $_SESSION['8int_inmem']    = $result;
                 $_SESSION['8int_inmem_sw'] = $_intDetSoftware;
                 header('Location: module.php?module=8core-integrity&page=module_integrity&tab=check&inmem=1');
                 exit;
@@ -368,11 +400,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!$row) {
                 _int_flash_set('err', 'Result not found.');
             } elseif ($action === 'ignore') {
-                integrity_add_ignore($pdo, $row['origin_path'], $row['destination_path'],
-                                     $row['relative_path'],
-                                     str_contains($row['type'], 'MISSING') ? 'missing_path' : 'extra_path');
+                // ignore_path field encodes match type: "exact:path" or "prefix:path/"
+                $rawIgnorePath = trim($_POST['ignore_path'] ?? ('exact:' . $row['relative_path']));
+                $colonPos      = strpos($rawIgnorePath, ':');
+                $matchType     = $colonPos !== false ? substr($rawIgnorePath, 0, $colonPos) : 'exact';
+                $ignPath       = $colonPos !== false ? substr($rawIgnorePath, $colonPos + 1) : $rawIgnorePath;
+                // Normalize: prefix entries have trailing slash
+                if ($matchType === 'prefix') {
+                    $ignPath = rtrim($ignPath, '/') . '/';
+                } else {
+                    $ignPath = rtrim($ignPath, '/');
+                }
+                $ignType = str_contains($row['type'], 'MISSING') ? 'missing_path' : 'extra_path';
+                integrity_add_ignore($pdo, $row['origin_path'], $row['destination_path'], $ignPath, $ignType);
                 integrity_update_result_status($pdo, $runId, $resultId, 'ignored_integrity');
-                _int_flash_set('ok', 'Ignored in Integrity: ' . $row['relative_path']);
+                $label = ($matchType === 'prefix') ? 'Subtree ignored: ' . $ignPath : 'Ignored: ' . $ignPath;
+                _int_flash_set('ok', $label);
             } elseif ($action === 'trash') {
                 $tr = integrity_do_trash_path($row['full_path'], $row['destination_path'], $row['relative_path']);
                 if ($tr['ok']) {
@@ -417,7 +460,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ? _int_parse_id_range($idRange)
             : $checkedIds;
 
-        $allowedBulk = ['ignore', 'trash'];
+        $allowedBulk = ['ignore', 'trash', 'replace_missing'];
         if (!in_array($bulkAction, $allowedBulk, true) || empty($ids) || $runId <= 0) {
             _int_flash_set('err', 'No items selected or invalid bulk action.');
             header('Location: ' . _int_build_check_url($runId, $filters));
@@ -431,25 +474,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
-        // Validate: trash only applies to EXTRA_ types
+        // Filter to eligible rows per action
         if ($bulkAction === 'trash') {
-            $rows = array_filter($rows, fn($r) => str_starts_with($r['type'], 'EXTRA_') && $r['status'] === 'new');
-        } elseif ($bulkAction === 'ignore') {
-            $rows = array_filter($rows, fn($r) => $r['status'] === 'new');
+            $eligible   = array_filter($rows, fn($r) => str_starts_with($r['type'], 'EXTRA_') && $r['status'] === 'new');
+            $skipped    = count($rows) - count($eligible);
+            $skipReason = 'only EXTRA_* rows with status "new" can be trashed';
+        } elseif ($bulkAction === 'replace_missing') {
+            $eligible   = array_filter($rows, fn($r) => str_starts_with($r['type'], 'MISSING_') && $r['status'] === 'new');
+            $skipped    = count($rows) - count($eligible);
+            $skipReason = 'only MISSING_* rows with status "new" can be replaced';
+        } else { // ignore
+            $eligible   = array_filter($rows, fn($r) => $r['status'] === 'new');
+            $skipped    = count($rows) - count($eligible);
+            $skipReason = 'only rows with status "new" can be ignored';
         }
-        $rows = array_values($rows);
+        $eligible = array_values($eligible);
 
-        if (empty($rows)) {
-            _int_flash_set('err', 'No eligible items for "' . $bulkAction . '" among selected IDs (wrong type or already actioned).');
+        if (empty($eligible)) {
+            $msg = 'No eligible items for "' . $bulkAction . '" among selected IDs';
+            if ($skipped > 0) $msg .= ' (' . $skipReason . ')';
+            _int_flash_set('err', $msg . '.');
             header('Location: ' . _int_build_check_url($runId, $filters));
             exit;
         }
 
         $_intBulkConfirm = [
-            'action'  => $bulkAction,
-            'run_id'  => $runId,
-            'rows'    => $rows,
-            'filters' => $filters,
+            'action'   => $bulkAction,
+            'run_id'   => $runId,
+            'rows'     => $eligible,
+            'skipped'  => $skipped,
+            'skip_reason' => $skipReason,
+            'filters'  => $filters,
         ];
         // Fall through to render (no redirect — confirm screen rendered in-page)
     }
@@ -466,7 +521,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'path'     => trim($_POST['fp']  ?? ''),
         ]);
 
-        if ($runId > 0 && !empty($ids) && in_array($bulkAction, ['ignore', 'trash'], true)) {
+        if ($runId > 0 && !empty($ids) && in_array($bulkAction, ['ignore', 'trash', 'replace_missing'], true)) {
             $rows  = integrity_load_results_by_ids($pdo, $runId, $ids);
             $ok    = 0;
             $fail  = 0;
@@ -489,10 +544,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         integrity_update_result_status($pdo, $runId, (int) $row['id'], 'failed', $tr['error']);
                         $fail++;
                     }
+                } elseif ($bulkAction === 'replace_missing' && str_starts_with($row['type'], 'MISSING_')) {
+                    $rr = integrity_do_replace_path($row['origin_path'], $row['relative_path'],
+                                                    $row['destination_path'], $row['relative_path']);
+                    if ($rr['ok']) {
+                        integrity_update_result_status($pdo, $runId, (int) $row['id'], 'replaced');
+                        $ok++;
+                    } else {
+                        integrity_update_result_status($pdo, $runId, (int) $row['id'], 'failed', $rr['error']);
+                        $fail++;
+                    }
                 }
             }
 
-            $msg = "Bulk {$bulkAction}: {$ok} succeeded";
+            $label = match($bulkAction) {
+                'ignore'          => 'Bulk ignore',
+                'trash'           => 'Bulk trash',
+                'replace_missing' => 'Bulk replace',
+                default           => 'Bulk action',
+            };
+            $msg = "{$label}: {$ok} succeeded";
             if ($fail > 0) $msg .= ", {$fail} failed";
             _int_flash_set($fail > 0 ? 'warn' : 'ok', $msg . '.');
         }
@@ -597,7 +668,8 @@ foreach (_int_flash_drain() as $fm) {
 if (isset($_GET['inmem']) && isset($_SESSION['8int_inmem'])) {
     $_intCheckResults = $_SESSION['8int_inmem'];
     $_intDetSoftware  = $_SESSION['8int_inmem_sw'] ?? '';
-    unset($_SESSION['8int_inmem'], $_SESSION['8int_inmem_sw']);
+    $_intScanExcl     = $_SESSION['8int_inmem_excl'] ?? '';
+    unset($_SESSION['8int_inmem'], $_SESSION['8int_inmem_sw'], $_SESSION['8int_inmem_excl']);
 }
 
 // Load persisted run from GET run_id
@@ -867,6 +939,23 @@ require __DIR__ . '/../../../includes/version.php';
 .int-check-context-label { font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; white-space:nowrap; }
 .int-check-context-val { font-family:var(--font-mono,monospace); color:var(--text); word-break:break-all; }
 
+/* ── Scan exclusions section ── */
+.int-excl-section { margin-top:14px; padding:14px 16px; background:#f8fafc; border:1px solid var(--border); border-radius:8px; }
+.int-excl-section-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-muted); margin-bottom:8px; display:flex; align-items:center; gap:8px; }
+.int-excl-section-title span { font-size:10px; font-weight:400; letter-spacing:0; text-transform:none; color:#64748b; }
+.int-excl-textarea { width:100%; box-sizing:border-box; padding:9px 11px; font-family:var(--font-mono,monospace); font-size:12px; background:#fff; border:1px solid var(--border); border-radius:6px; color:var(--text); resize:vertical; min-height:88px; outline:none; transition:border-color .13s; }
+.int-excl-textarea:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.15); }
+.int-excl-hint { font-size:11px; color:var(--text-muted); margin-top:5px; line-height:1.5; }
+.int-excl-hint code { font-family:var(--font-mono,monospace); background:var(--surface2); border:1px solid var(--border); border-radius:3px; padding:1px 5px; }
+
+/* ── Ignore select+button ── */
+.int-ignore-combo { display:flex; gap:4px; align-items:center; }
+.int-ignore-select { padding:3px 6px; font-size:11px; border:1px solid var(--border); border-radius:5px; background:#fff; color:var(--text); outline:none; max-width:200px; }
+.int-ignore-select:focus { border-color:#d97706; }
+
+/* ── Run exclusions tag ── */
+.int-excl-tag { display:inline-flex; align-items:center; gap:4px; padding:2px 7px; border-radius:10px; font-size:10px; font-weight:600; background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe; font-family:var(--font-mono,monospace); }
+
 @media (max-width:720px) {
   .int-form-grid { grid-template-columns:1fr; }
   .int-tree-wrap { flex-direction:column; }
@@ -888,7 +977,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   <div class="topbar">
     <div class="topbar-title">8Core Integrity</div>
     <div class="topbar-meta">
-      <span style="font-size:12px;color:var(--text-muted);">v0.6.0</span>
+      <span style="font-size:12px;color:var(--text-muted);">v0.7.0</span>
       &nbsp;&nbsp;<a href="../logout.php" style="color:var(--text-muted);font-size:12px;">Odjava</a>
     </div>
   </div>
@@ -1289,11 +1378,28 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               </div>
             </div>
 
+          </div><!-- /.int-form-grid -->
+
+          <!-- ── Scan exclusions ── -->
+          <div class="int-excl-section">
+            <div class="int-excl-section-title">
+              Scan exclusions
+              <span>— these paths are excluded during structural comparison, not just filtered from the view</span>
+            </div>
+            <textarea name="scan_exclusions" class="int-excl-textarea"
+                      placeholder="administrator/components/&#10;plugins/&#10;templates/&#10;media/"><?= h($_intScanExcl) ?></textarea>
+            <div class="int-excl-hint">
+              One path per line. Relative to the Destination root, or absolute (auto-stripped to relative).
+              Entire subtrees are excluded — e.g. <code>administrator/components/</code> excludes all extensions.
+              Malware scanner runs independently and is NOT affected by these exclusions.
+            </div>
           </div>
 
-          <button type="submit" class="btn btn-primary">
-            Run Structural Check
-          </button>
+          <div style="margin-top:14px;">
+            <button type="submit" class="btn btn-primary">
+              Run Structural Check
+            </button>
+          </div>
         </form>
         <div class="int-placeholder">
           Structural check compares file/folder existence only. Hash comparison will be available in a future version.
@@ -1303,10 +1409,19 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
         // ── Bulk confirm screen ────────────────────────────────────────────────
         if ($_intBulkConfirm):
             $bc      = $_intBulkConfirm;
-            $bcLabel = $bc['action'] === 'trash' ? 'Move to Integrity Trash' : 'Ignore in Integrity';
+            $bcLabel = match($bc['action']) {
+                'trash'           => 'Move to Integrity Trash',
+                'replace_missing' => 'Replace missing from Origin',
+                default           => 'Ignore in Integrity',
+            };
         ?>
         <div class="int-bulk-confirm">
           <div class="int-bulk-confirm-title">Confirm bulk action: <?= h($bcLabel) ?> — <?= count($bc['rows']) ?> item(s)</div>
+          <?php if (!empty($bc['skipped'])): ?>
+          <div style="font-size:11px;color:#92400e;margin-bottom:8px;">
+            <?= (int)$bc['skipped'] ?> item(s) skipped: <?= h($bc['skip_reason'] ?? '') ?>.
+          </div>
+          <?php endif; ?>
           <div class="int-bulk-confirm-list">
             <table>
               <thead><tr><th>ID</th><th>Severity</th><th>Type</th><th>Relative path</th></tr></thead>
@@ -1384,9 +1499,26 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
               <?php endif; ?>
               <span style="font-size:11px;color:var(--text-muted);"><?= (int)$meta['total'] ?> total</span>
             </div>
+            <?php if (!empty($meta['scan_exclusions'])): ?>
+            <div class="int-run-bar-sep"></div>
+            <div class="int-run-bar-item" style="max-width:320px;">
+              <div class="int-run-bar-label">Scan exclusions applied</div>
+              <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:3px;">
+                <?php foreach (explode("\n", $meta['scan_exclusions']) as $excl): ?>
+                  <?php if (trim($excl) !== ''): ?>
+                  <span class="int-excl-tag"><?= h(trim($excl)) ?></span>
+                  <?php endif; ?>
+                <?php endforeach; ?>
+              </div>
+            </div>
+            <?php endif; ?>
           </div>
 
-          <!-- Filter bar -->
+          <!-- Filter bar (result filters only — not scan exclusions) -->
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px;">
+            Result filters
+            <span style="font-size:10px;font-weight:400;text-transform:none;letter-spacing:0;color:#94a3b8;margin-left:6px;">— filter the view of stored results; does not re-run the check</span>
+          </div>
           <form method="get" action="module.php" id="int-filter-form" class="int-filter-bar">
             <input type="hidden" name="module"  value="8core-integrity">
             <input type="hidden" name="page"    value="module_integrity">
@@ -1458,6 +1590,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                   <option value="">— select action —</option>
                   <option value="ignore">Ignore in Integrity</option>
                   <option value="trash">Move to Integrity Trash (EXTRA only)</option>
+                  <option value="replace_missing">Replace missing from Origin (MISSING only)</option>
                 </select>
               </div>
               <div style="display:flex;flex-direction:column;">
@@ -1517,7 +1650,10 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                   <td>
                     <?php if (!$isActioned): ?>
                     <div class="int-row-actions">
-                      <!-- Ignore -->
+                      <!-- Ignore with subtree select -->
+                      <?php if ($r['type'] !== 'USER_CONTENT_FOLDER'):
+                        $ignOpts = _int_ignore_options($r['relative_path']);
+                      ?>
                       <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
                         <input type="hidden" name="action"        value="action_result">
                         <input type="hidden" name="run_id"        value="<?= (int)$_intRunId ?>">
@@ -1527,11 +1663,23 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                         <input type="hidden" name="<?= h($fk) ?>" value="<?= h($fv) ?>">
                         <?php endforeach; ?>
                         <?= csrf_field() ?>
-                        <button type="button" class="int-btn-act act-ignore"
-                                onclick="if(confirm('Ignore &quot;<?= h(addslashes($r['relative_path'])) ?>&quot; in Integrity checks?')) this.closest('form').submit()">
-                          Ignore
-                        </button>
+                        <div class="int-ignore-combo">
+                          <?php if (count($ignOpts) > 1): ?>
+                          <select name="ignore_path" class="int-ignore-select">
+                            <?php foreach ($ignOpts as $opt): ?>
+                            <option value="<?= h($opt['value']) ?>"><?= h($opt['label']) ?></option>
+                            <?php endforeach; ?>
+                          </select>
+                          <?php else: ?>
+                          <input type="hidden" name="ignore_path" value="<?= h($ignOpts[0]['value'] ?? 'exact:' . $r['relative_path']) ?>">
+                          <?php endif; ?>
+                          <button type="button" class="int-btn-act act-ignore"
+                                  onclick="this.closest('form').submit()">
+                            Ignore
+                          </button>
+                        </div>
                       </form>
+                      <?php endif; ?>
                       <?php if ($isExtra): ?>
                       <!-- Trash -->
                       <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
@@ -1548,8 +1696,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                           Trash
                         </button>
                       </form>
-                      <?php endif; ?>
-                      <?php if ($isMissing): ?>
+                      <?php elseif ($isMissing): ?>
                       <!-- Replace from origin -->
                       <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline">
                         <input type="hidden" name="action"        value="action_result">
@@ -1561,6 +1708,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
                         <?php endforeach; ?>
                         <?= csrf_field() ?>
                         <button type="button" class="int-btn-act act-replace"
+                                title="Copy missing file/folder from origin repository to destination."
                                 onclick="if(confirm('Replace &quot;<?= h(addslashes($r['relative_path'])) ?>&quot; from origin?')) this.closest('form').submit()">
                           Replace
                         </button>
