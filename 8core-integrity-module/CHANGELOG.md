@@ -1,5 +1,32 @@
 # 8Core Integrity — Changelog
 
+## [0.5.0] — 2026-07-01
+
+### Added
+
+- `includes/integrity.php` — `integrity_user_content_folders(software)`: returns predefined user-content folder list per CMS (Joomla: images, cache, tmp, logs; WordPress: wp-content/uploads, wp-content/cache; PrestaShop: img, cache, log, download, upload)
+- `includes/integrity.php` — `_int_scan_tree()`: recursive tree scanner that stops at user-content boundaries and rejects symlinks escaping the tree root; hard limit 20,000 items per tree
+- `includes/integrity.php` — `integrity_structural_check()`: compares origin repo vs destination by file/folder existence; finding types: EXTRA_DIRECTORY, EXTRA_FILE, MISSING_DIRECTORY, MISSING_FILE, USER_CONTENT_FOLDER; severity: suspicious (extra at root depth 0), warning (extra below root, all missing), info (user-content folder present)
+- `includes/integrity.php` — `integrity_ignores_for()` / `integrity_add_ignore()`: Integrity-specific ignore list backed by `scanner_integrity_ignores` DB table. Independent of scanner_ignore_list, scanner_rules, and IOC engine.
+- `admin/module_integrity.php` — `run_structural_check` POST handler: runs structural check for submitted origin+destination pair
+- `admin/module_integrity.php` — `add_integrity_ignore` POST handler: adds ignore entry and immediately re-runs check with updated list
+- `admin/module_integrity.php` — Integrity Check tab: results table with Severity / Type / Path / Action columns, summary bar (counts by severity), context bar (origin, destination, software), "Ignore in Integrity" action per finding
+- `admin/module_integrity.php` — `detected_software` hidden input propagated through check and ignore forms; populated by JS after software detection
+- `install/migrations/20260701_006_add_integrity_ignores.sql`: new `scanner_integrity_ignores` table
+
+### Changed
+
+- "Run Integrity Check" button renamed to "Run Structural Check" and enabled
+- Placeholder text updated to reflect hash comparison as future feature (structural check is live)
+- `module.php` version bumped to `0.5.0`
+
+### Not implemented (planned)
+
+- Hash comparison (file content integrity)
+- Malware scan integration
+- Quarantine / delete / replace actions
+- Scanner worker integration
+
 ## [0.4.0] — 2026-07-01
 
 ### Added

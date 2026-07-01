@@ -14,8 +14,12 @@ require_once __DIR__ . '/../includes/integrity.php';
 $_intMessages      = [];
 $_intShowRootCmd   = false;
 $_intRootCmd       = '';
-$_intImportSuccess = null;   // set on successful ZIP import
-$_intZipConflict   = null;   // set when target exists, needs replace confirmation
+$_intImportSuccess = null;
+$_intZipConflict   = null;
+$_intCheckResults  = null;   // set after run_structural_check or add_integrity_ignore
+$_intCheckOrigin   = '';
+$_intCheckDest     = '';
+$_intDetSoftware   = '';     // detected software name (passed through forms)
 
 // ── POST handlers ──────────────────────────────────────────────────────────────
 
@@ -240,6 +244,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stored = $_SESSION['8int_zip'][$token] ?? null;
         unset($_SESSION['8int_zip'][$token]);
         if ($stored && isset($stored['path'])) @unlink($stored['path']);
+    }
+
+    // ── Run structural check ───────────────────────────────────────────────────
+    if ($postAction === 'run_structural_check') {
+        $_intDetSoftware  = trim($_POST['detected_software'] ?? '');
+        $_intCheckOrigin  = trim($_POST['origin_path_manual'] ?? '') ?: trim($_POST['origin_path'] ?? '');
+        $_intCheckDest    = trim($_POST['dest_path'] ?? '');
+
+        if ($_intCheckOrigin === '' || $_intCheckDest === '') {
+            $_intMessages[] = ['type' => 'err', 'text' => 'Both origin and destination paths are required.'];
+        } else {
+            $ignores = integrity_ignores_for($pdo, $_intCheckOrigin, $_intCheckDest);
+            $result  = integrity_structural_check($_intCheckOrigin, $_intCheckDest, $_intDetSoftware, $ignores);
+            if (!$result['ok']) {
+                $_intMessages[] = ['type' => 'err', 'text' => 'Check failed: ' . $result['error']];
+            } else {
+                $_intCheckResults = $result;
+            }
+        }
+    }
+
+    // ── Add integrity ignore (then re-run check) ───────────────────────────────
+    if ($postAction === 'add_integrity_ignore') {
+        $_intDetSoftware = trim($_POST['detected_software'] ?? '');
+        $_intCheckOrigin = trim($_POST['origin_path']  ?? '');
+        $_intCheckDest   = trim($_POST['dest_path']    ?? '');
+        $ignPath         = trim($_POST['ignored_path'] ?? '');
+        $ignType         = trim($_POST['ignore_type']  ?? 'extra_path');
+        $ignNote         = trim($_POST['ignore_note']  ?? '');
+
+        if ($_intCheckOrigin && $_intCheckDest && $ignPath) {
+            if (integrity_add_ignore($pdo, $_intCheckOrigin, $_intCheckDest, $ignPath, $ignType, $ignNote)) {
+                $_intMessages[] = ['type' => 'ok', 'text' => 'Ignored in Integrity: ' . $ignPath];
+            } else {
+                $_intMessages[] = ['type' => 'err', 'text' => 'Could not add ignore (invalid path or DB error).'];
+            }
+            // Re-run check with updated ignore list
+            $ignores = integrity_ignores_for($pdo, $_intCheckOrigin, $_intCheckDest);
+            $result  = integrity_structural_check($_intCheckOrigin, $_intCheckDest, $_intDetSoftware, $ignores);
+            if ($result['ok']) {
+                $_intCheckResults = $result;
+            }
+        }
     }
 
     // ── AJAX: browse directory ─────────────────────────────────────────────────
@@ -483,6 +530,37 @@ require __DIR__ . '/../../../includes/version.php';
 .int-tab:hover { color:var(--text); border-bottom-color:var(--border); }
 .int-tab.is-active { color:#2563eb; border-bottom-color:#2563eb; }
 
+/* ── Check results ── */
+.int-check-results { margin-top:18px; }
+.int-results-summary { display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:12px 16px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; margin-bottom:14px; font-size:13px; }
+.int-results-total { font-weight:700; color:var(--text); margin-right:4px; }
+.int-sev-tag { display:inline-flex; align-items:center; gap:4px; padding:2px 9px; border-radius:10px; font-size:11px; font-weight:700; }
+.int-sev-tag.is-suspicious { background:#fee2e2; color:#dc2626; }
+.int-sev-tag.is-warning    { background:#fff7ed; color:#d97706; }
+.int-sev-tag.is-info       { background:#eff6ff; color:#2563eb; }
+.int-results-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:8px; }
+.int-results-table { width:100%; border-collapse:collapse; font-size:12px; }
+.int-results-table th { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-muted); padding:9px 12px; border-bottom:2px solid var(--border); text-align:left; white-space:nowrap; background:var(--surface2); }
+.int-results-table td { padding:8px 12px; border-bottom:1px solid var(--border); vertical-align:middle; }
+.int-results-table tr:last-child td { border-bottom:none; }
+.int-results-table tr.sev-suspicious td { background:rgba(220,38,38,.04); }
+.int-results-table tr.sev-info td { background:rgba(37,99,235,.03); }
+.int-sev-badge { display:inline-block; padding:2px 7px; border-radius:4px; font-size:10px; font-weight:700; letter-spacing:.04em; white-space:nowrap; }
+.int-sev-badge.suspicious { background:#fee2e2; color:#dc2626; }
+.int-sev-badge.warning    { background:#fff7ed; color:#d97706; }
+.int-sev-badge.info       { background:#eff6ff; color:#2563eb; }
+.int-result-type { font-family:var(--font-mono,monospace); font-size:11px; font-weight:700; color:var(--text); white-space:nowrap; }
+.int-result-rel  { font-family:var(--font-mono,monospace); font-size:12px; color:var(--text); word-break:break-all; }
+.int-result-full { font-family:var(--font-mono,monospace); font-size:10px; color:var(--text-muted); word-break:break-all; margin-top:2px; }
+.int-btn-ignore { background:none; border:1px solid var(--border); border-radius:5px; padding:4px 9px; font-size:11px; color:var(--text-muted); cursor:pointer; white-space:nowrap; transition:background .12s, color .12s, border-color .12s; }
+.int-btn-ignore:hover { background:#fef3c7; border-color:#d97706; color:#92400e; }
+.int-truncated-note { padding:10px 14px; font-size:11px; color:#b45309; background:#fffbeb; border:1px solid #fde68a; border-radius:6px; margin-top:12px; }
+.int-no-findings { padding:20px 16px; font-size:13px; color:#16a34a; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:8px; font-weight:600; margin-top:14px; }
+.int-check-context { display:flex; flex-wrap:wrap; gap:16px; padding:10px 14px; background:var(--surface2); border:1px solid var(--border); border-radius:7px; margin-bottom:14px; font-size:11px; }
+.int-check-context-item { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.int-check-context-label { font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; white-space:nowrap; }
+.int-check-context-val { font-family:var(--font-mono,monospace); color:var(--text); word-break:break-all; }
+
 @media (max-width:720px) {
   .int-form-grid { grid-template-columns:1fr; }
   .int-tree-wrap { flex-direction:column; }
@@ -504,7 +582,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   <div class="topbar">
     <div class="topbar-title">8Core Integrity</div>
     <div class="topbar-meta">
-      <span style="font-size:12px;color:var(--text-muted);">v0.4.0</span>
+      <span style="font-size:12px;color:var(--text-muted);">v0.5.0</span>
       &nbsp;&nbsp;<a href="../logout.php" style="color:var(--text-muted);font-size:12px;">Odjava</a>
     </div>
   </div>
@@ -842,7 +920,9 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
       <hr class="int-divider">
       <div class="int-body">
         <form method="post" action="module.php?module=8core-integrity&page=module_integrity&tab=check" id="int-check-form">
-          <input type="hidden" name="action" value="integrity_check">
+          <input type="hidden" name="action" value="run_structural_check">
+          <input type="hidden" name="detected_software" id="int-detected-software"
+                 value="<?= h($_intDetSoftware) ?>">
           <?= csrf_field() ?>
           <div class="int-form-grid">
 
@@ -905,13 +985,114 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
 
           </div>
 
-          <button type="submit" class="btn btn-primary" disabled title="Available after hash database implementation">
-            Run Integrity Check
+          <button type="submit" class="btn btn-primary">
+            Run Structural Check
           </button>
         </form>
         <div class="int-placeholder">
-          Integrity comparison will be available after hash database implementation.
+          Structural check compares file/folder existence only. Hash comparison will be available in a future version.
         </div>
+
+        <?php if ($_intCheckResults): $cr = $_intCheckResults; ?>
+        <div class="int-check-results">
+
+          <!-- Context bar -->
+          <div class="int-check-context">
+            <div class="int-check-context-item">
+              <span class="int-check-context-label">Origin</span>
+              <span class="int-check-context-val"><?= h($cr['origin']) ?></span>
+            </div>
+            <div class="int-check-context-item">
+              <span class="int-check-context-label">Destination</span>
+              <span class="int-check-context-val"><?= h($cr['dest']) ?></span>
+            </div>
+            <?php if ($_intDetSoftware && $_intDetSoftware !== 'Unknown'): ?>
+            <div class="int-check-context-item">
+              <span class="int-check-context-label">Software</span>
+              <span class="int-check-context-val"><?= h($_intDetSoftware) ?></span>
+            </div>
+            <?php endif; ?>
+          </div>
+
+          <?php if (empty($cr['findings'])): ?>
+          <div class="int-no-findings">No structural differences found.</div>
+          <?php else: ?>
+
+          <!-- Summary bar -->
+          <div class="int-results-summary">
+            <span class="int-results-total"><?= number_format(count($cr['findings'])) ?> finding<?= count($cr['findings']) !== 1 ? 's' : '' ?></span>
+            <?php if ($cr['counts']['suspicious'] > 0): ?>
+              <span class="int-sev-tag is-suspicious"><?= number_format($cr['counts']['suspicious']) ?> suspicious</span>
+            <?php endif; ?>
+            <?php if ($cr['counts']['warning'] > 0): ?>
+              <span class="int-sev-tag is-warning"><?= number_format($cr['counts']['warning']) ?> warning<?= $cr['counts']['warning'] !== 1 ? 's' : '' ?></span>
+            <?php endif; ?>
+            <?php if ($cr['counts']['info'] > 0): ?>
+              <span class="int-sev-tag is-info"><?= number_format($cr['counts']['info']) ?> info</span>
+            <?php endif; ?>
+          </div>
+
+          <!-- Results table -->
+          <div class="int-results-wrap">
+            <table class="int-results-table">
+              <thead>
+                <tr>
+                  <th>Severity</th>
+                  <th>Type</th>
+                  <th>Path</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($cr['findings'] as $f): ?>
+                <tr class="sev-<?= h($f['severity']) ?>">
+                  <td>
+                    <span class="int-sev-badge <?= h($f['severity']) ?>">
+                      <?= strtoupper(h($f['severity'])) ?>
+                    </span>
+                  </td>
+                  <td><span class="int-result-type"><?= h($f['type']) ?></span></td>
+                  <td>
+                    <div class="int-result-rel"><?= h($f['rel']) ?></div>
+                    <div class="int-result-full"><?= h($f['fullpath']) ?></div>
+                  </td>
+                  <td>
+                    <?php if ($f['type'] !== 'USER_CONTENT_FOLDER'): ?>
+                    <form method="post"
+                          action="module.php?module=8core-integrity&page=module_integrity&tab=check"
+                          style="display:inline">
+                      <input type="hidden" name="action"            value="add_integrity_ignore">
+                      <input type="hidden" name="origin_path"       value="<?= h($cr['origin']) ?>">
+                      <input type="hidden" name="dest_path"         value="<?= h($cr['dest']) ?>">
+                      <input type="hidden" name="ignored_path"      value="<?= h($f['rel']) ?>">
+                      <input type="hidden" name="ignore_type"       value="<?= str_contains($f['type'], 'MISSING') ? 'missing_path' : 'extra_path' ?>">
+                      <input type="hidden" name="detected_software" value="<?= h($_intDetSoftware) ?>">
+                      <?= csrf_field() ?>
+                      <button type="button" class="int-btn-ignore"
+                              onclick="if(confirm('Ignore \&quot;<?= h(addslashes($f['rel'])) ?>\&quot; in Integrity checks for this destination?')) this.closest('form').submit()">
+                        Ignore in Integrity
+                      </button>
+                    </form>
+                    <?php else: ?>
+                    <span style="font-size:11px;color:var(--text-muted);">User content</span>
+                    <?php endif; ?>
+                  </td>
+                </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
+
+          <?php endif; ?>
+
+          <?php if ($cr['truncated']): ?>
+          <div class="int-truncated-note">
+            Result truncated: installation exceeds 20,000 items. Only the first items are shown.
+          </div>
+          <?php endif; ?>
+
+        </div>
+        <?php endif; ?>
       </div>
     </div>
 
@@ -967,6 +1148,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
   var detVersion   = document.getElementById('int-det-version');
   var detRoot      = document.getElementById('int-det-root');
   var detWarning   = document.getElementById('int-detect-warning');
+  var detHidden    = document.getElementById('int-detected-software');
 
   var selectedPath = '';
 
@@ -1121,6 +1303,7 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
       detVersion.textContent  = data.version  || 'unknown';
       detRoot.textContent     = data.root     || path;
       detWarning.style.display = (data.software === 'Unknown') ? 'block' : 'none';
+      if (detHidden) detHidden.value = data.software || '';
     });
   }
 

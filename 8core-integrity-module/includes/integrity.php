@@ -474,3 +474,224 @@ function _int_read_phpbb_version(string $file): string
     return 'unknown';
 }
 
+// ── User-content folders ───────────────────────────────────────────────────────
+
+/**
+ * Returns relative folder paths whose contents should not be structurally compared.
+ * The folders themselves are still expected to exist.
+ */
+function integrity_user_content_folders(string $software): array {
+    return match (strtolower($software)) {
+        'joomla'     => ['images', 'cache', 'tmp', 'logs'],
+        'wordpress'  => ['wp-content/uploads', 'wp-content/cache'],
+        'prestashop' => ['img', 'cache', 'log', 'download', 'upload'],
+        default      => [],
+    };
+}
+
+// ── DB: integrity ignore list ──────────────────────────────────────────────────
+
+/**
+ * Returns array of ignored relative paths for a specific origin+destination pair.
+ */
+function integrity_ignores_for(PDO $pdo, string $originPath, string $destPath): array {
+    $stmt = $pdo->prepare(
+        'SELECT ignored_path FROM scanner_integrity_ignores
+          WHERE origin_path = :o AND destination_path = :d'
+    );
+    $stmt->execute([':o' => $originPath, ':d' => $destPath]);
+    return array_column($stmt->fetchAll(), 'ignored_path');
+}
+
+/**
+ * Adds an integrity ignore entry. Silently deduplicates.
+ */
+function integrity_add_ignore(
+    PDO    $pdo,
+    string $originPath,
+    string $destPath,
+    string $ignoredPath,
+    string $ignoreType = 'extra_path',
+    string $note = ''
+): bool {
+    $ignoredPath = ltrim($ignoredPath, '/');
+    if ($ignoredPath === '' || str_contains($ignoredPath, '..')) return false;
+
+    $ignoreType = in_array($ignoreType, ['extra_path', 'missing_path'], true)
+        ? $ignoreType : 'extra_path';
+
+    $check = $pdo->prepare(
+        'SELECT id FROM scanner_integrity_ignores
+          WHERE origin_path = :o AND destination_path = :d AND ignored_path = :i
+          LIMIT 1'
+    );
+    $check->execute([':o' => $originPath, ':d' => $destPath, ':i' => $ignoredPath]);
+    if ($check->fetchColumn()) return true;
+
+    $stmt = $pdo->prepare(
+        'INSERT INTO scanner_integrity_ignores
+           (origin_path, destination_path, ignored_path, ignore_type, note, created_at)
+         VALUES (:o, :d, :i, :t, :n, NOW())'
+    );
+    return $stmt->execute([':o' => $originPath, ':d' => $destPath, ':i' => $ignoredPath,
+                           ':t' => $ignoreType, ':n' => $note]);
+}
+
+// ── Structural check ───────────────────────────────────────────────────────────
+
+/**
+ * Recursive tree scanner. Stops recursion at user-content folder boundaries
+ * and at symlinks pointing outside $base.
+ */
+function _int_scan_tree(
+    string $base,
+    string $relPrefix,
+    array  $ucFolders,
+    array  &$items,
+    int    $maxItems = 20000
+): void {
+    if (count($items) >= $maxItems) return;
+
+    $dir  = $base . ($relPrefix !== '' ? '/' . $relPrefix : '');
+    $scan = @scandir($dir);
+    if ($scan === false) return;
+
+    foreach ($scan as $name) {
+        if ($name === '.' || $name === '..') continue;
+        if (count($items) >= $maxItems) break;
+
+        $rel  = $relPrefix !== '' ? $relPrefix . '/' . $name : $name;
+        $full = $base . '/' . $rel;
+
+        // Don't follow symlinks that escape the tree root
+        if (is_link($full)) {
+            $real = realpath($full);
+            if ($real === false || !str_starts_with($real, $base . '/')) continue;
+        }
+
+        $isDir         = is_dir($full);
+        $isUserContent = $isDir && in_array($rel, $ucFolders, true);
+
+        $items[] = ['rel' => $rel, 'is_dir' => $isDir, 'is_user_content' => $isUserContent];
+
+        if ($isDir && !$isUserContent) {
+            _int_scan_tree($base, $rel, $ucFolders, $items, $maxItems);
+        }
+    }
+}
+
+/**
+ * Structural integrity check: compares origin repo vs destination install by
+ * folder/file existence only. No hash comparison. No content analysis.
+ *
+ * Finding types:
+ *   EXTRA_DIRECTORY   — in destination root or subdirectory, not in origin
+ *   EXTRA_FILE        — same, but file
+ *   MISSING_DIRECTORY — in origin, absent in destination
+ *   MISSING_FILE      — same, but file
+ *   USER_CONTENT_FOLDER — known runtime folder, contents not compared (info only)
+ *
+ * Severity:
+ *   extra at destination root (depth 0) → suspicious
+ *   extra below root                    → warning
+ *   missing                             → warning
+ *   user-content folder present         → info
+ *
+ * @param string   $originPath   Clean repo path
+ * @param string   $destPath     Installation path, must be under /home
+ * @param string   $software     Detected software name
+ * @param string[] $ignoredPaths Relative paths to skip
+ *
+ * @return array {ok, error, findings, origin, dest, truncated, counts}
+ */
+function integrity_structural_check(
+    string $originPath,
+    string $destPath,
+    string $software,
+    array  $ignoredPaths
+): array {
+    $empty = ['findings' => [], 'origin' => '', 'dest' => '', 'truncated' => false, 'counts' => []];
+
+    $realOrigin = realpath($originPath);
+    if ($realOrigin === false || !is_dir($realOrigin)) {
+        return array_merge($empty, ['ok' => false, 'error' => 'Origin path not accessible: ' . $originPath]);
+    }
+
+    $realDest = realpath($destPath);
+    if ($realDest === false || !is_dir($realDest)) {
+        return array_merge($empty, ['ok' => false, 'error' => 'Destination path not accessible: ' . $destPath,
+                                    'origin' => $realOrigin]);
+    }
+    if ($realDest !== '/home' && !str_starts_with($realDest, '/home/')) {
+        return array_merge($empty, ['ok' => false, 'error' => 'Destination must be inside /home.',
+                                    'origin' => $realOrigin, 'dest' => $realDest]);
+    }
+
+    $ucFolders  = integrity_user_content_folders($software);
+    $ignoredSet = array_flip($ignoredPaths);
+    $maxItems   = 20000;
+    $truncated  = false;
+
+    $originItems = [];
+    _int_scan_tree($realOrigin, '', $ucFolders, $originItems, $maxItems);
+    if (count($originItems) >= $maxItems) $truncated = true;
+
+    $destItems = [];
+    _int_scan_tree($realDest, '', $ucFolders, $destItems, $maxItems);
+    if (count($destItems) >= $maxItems) $truncated = true;
+
+    $originSet = array_column($originItems, null, 'rel');
+    $destSet   = array_column($destItems,   null, 'rel');
+
+    $findings = [];
+    $counts   = ['suspicious' => 0, 'warning' => 0, 'info' => 0];
+
+    // Missing: in origin, not in destination
+    foreach ($originItems as $item) {
+        $rel = $item['rel'];
+        if (isset($ignoredSet[$rel])) continue;
+        if (!isset($destSet[$rel])) {
+            $type = $item['is_dir'] ? 'MISSING_DIRECTORY' : 'MISSING_FILE';
+            $findings[]       = ['type' => $type, 'rel' => $rel,
+                                  'fullpath' => $realDest . '/' . $rel, 'severity' => 'warning'];
+            $counts['warning']++;
+        } elseif ($item['is_user_content']) {
+            $findings[] = ['type' => 'USER_CONTENT_FOLDER', 'rel' => $rel,
+                           'fullpath' => $realDest . '/' . $rel, 'severity' => 'info'];
+            $counts['info']++;
+        }
+    }
+
+    // Extra: in destination, not in origin
+    foreach ($destItems as $item) {
+        $rel = $item['rel'];
+        if (isset($ignoredSet[$rel])) continue;
+        if ($item['is_user_content']) continue;
+        if (isset($originSet[$rel]))  continue;
+
+        $type     = $item['is_dir'] ? 'EXTRA_DIRECTORY' : 'EXTRA_FILE';
+        $depth    = substr_count($rel, '/');
+        $severity = ($depth === 0) ? 'suspicious' : 'warning';
+
+        $findings[]         = ['type' => $type, 'rel' => $rel,
+                                'fullpath' => $realDest . '/' . $rel, 'severity' => $severity];
+        $counts[$severity]++;
+    }
+
+    $order = ['suspicious' => 0, 'warning' => 1, 'info' => 2];
+    usort($findings, static fn($a, $b) =>
+        ($order[$a['severity']] ?? 9) <=> ($order[$b['severity']] ?? 9)
+        ?: strcmp($a['rel'], $b['rel'])
+    );
+
+    return [
+        'ok'        => true,
+        'error'     => '',
+        'findings'  => $findings,
+        'origin'    => $realOrigin,
+        'dest'      => $realDest,
+        'truncated' => $truncated,
+        'counts'    => $counts,
+    ];
+}
+
