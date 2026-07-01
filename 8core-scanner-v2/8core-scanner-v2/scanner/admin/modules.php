@@ -1,6 +1,6 @@
 <?php
 /**
- * 8Core Scanner v2.6.5 — Admin: Module Manager
+ * 8Core Scanner v2.6.6 — Admin: Module Manager
  * (c) 2026 Tomislav Galić <tomislav@8core.hr>
  * Sva prava pridržana.
  */
@@ -10,8 +10,8 @@ require __DIR__ . '/../includes/modules.php';
 require_admin();
 
 $tableReady = scanner_modules_table_exists($pdo);
-$modules    = $tableReady ? scanner_modules_all($pdo) : [];
 
+// ── Flash ──────────────────────────────────────────────────────────────────────
 $flash     = '';
 $flashType = '';
 if (!empty($_SESSION['modules_flash'])) {
@@ -19,14 +19,64 @@ if (!empty($_SESSION['modules_flash'])) {
     $flashType = $_SESSION['modules_flash_type'] ?? 'ok';
     unset($_SESSION['modules_flash'], $_SESSION['modules_flash_type']);
 }
+
+// ── Discover: fajlovi modula u modules/ ───────────────────────────────────────
+$modulesDir       = __DIR__ . '/../modules/';
+$discoveredModules = [];
+
+if (is_dir($modulesDir)) {
+    foreach (glob($modulesDir . '*/module.php') ?: [] as $manifestPath) {
+        $manifest = @include $manifestPath;
+        if (!is_array($manifest)) continue;
+        $key = isset($manifest['module_key']) ? trim($manifest['module_key']) : '';
+        if (!preg_match('/^[a-z0-9\-]+$/', $key)) continue;
+        $discoveredModules[$key] = [
+            'module_key'  => $key,
+            'name'        => $manifest['name']        ?? $key,
+            'version'     => $manifest['version']     ?? null,
+            'description' => $manifest['description'] ?? null,
+            'manifest_path' => $manifestPath,
+        ];
+    }
+}
+
+// ── Installed modules ─────────────────────────────────────────────────────────
+$installedModules = $tableReady ? scanner_modules_all($pdo) : [];
+$installedKeys    = array_column($installedModules, null, 'module_key');
+
+// ── Available (discovered but not installed) ──────────────────────────────────
+$availableModules = [];
+foreach ($discoveredModules as $key => $info) {
+    if (!isset($installedKeys[$key])) {
+        $availableModules[] = $info;
+    }
+}
 ?>
 <!doctype html>
 <html lang="hr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>8Core Scanner – Modules</title>
+<title>8Core Scanner – Module Manager</title>
 <link rel="stylesheet" href="../assets/css/scanner.css">
+<style>
+.mod-section { background:var(--surface); border:1px solid var(--border); border-radius:10px; margin-bottom:18px; }
+.mod-section-header { padding:16px 20px 0; display:flex; align-items:center; gap:10px; }
+.mod-section-header h3 { margin:0; font-size:13px; font-weight:700; color:var(--text); }
+.mod-section-header .badge-count { background:var(--accent,#2563eb); color:#fff; border-radius:999px; padding:1px 8px; font-size:11px; }
+.mod-divider { border:none; border-top:1px solid var(--border); margin:12px 0 0; }
+.mod-empty { padding:18px 20px; color:var(--text-muted); font-size:13px; }
+.mod-table { width:100%; border-collapse:collapse; font-size:13px; }
+.mod-table th { text-align:left; padding:8px 16px; font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; border-bottom:1px solid var(--border); }
+.mod-table td { padding:10px 16px; border-bottom:1px solid var(--bg); vertical-align:middle; }
+.mod-table tr:last-child td { border-bottom:none; }
+.mod-table code { font-size:11px; background:var(--bg); padding:2px 6px; border-radius:4px; }
+.mod-desc { color:var(--text-muted); font-size:12px; }
+.upload-form { padding:16px 20px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.upload-hint { padding:0 20px 16px; font-size:12px; color:var(--text-muted); }
+.flash-ok  { border-color:#22c55e; }
+.flash-err { border-color:#ef4444; }
+</style>
 </head>
 <body>
 <div class="layout">
@@ -35,7 +85,7 @@ if (!empty($_SESSION['modules_flash'])) {
 
 <div class="main">
   <div class="topbar">
-    <div class="topbar-title">Modules</div>
+    <div class="topbar-title">Module Manager</div>
     <div class="topbar-meta">
       <a href="../logout.php" style="color:var(--text-muted);font-size:12px;">Odjava</a>
     </div>
@@ -44,20 +94,121 @@ if (!empty($_SESSION['modules_flash'])) {
   <div class="content">
 
     <?php if ($flash): ?>
-    <div class="panel" style="border-color:<?= $flashType === 'error' ? 'var(--risk-critical)' : 'var(--risk-low)' ?>;margin-bottom:16px;">
-      <p style="margin:0;color:<?= $flashType === 'error' ? 'var(--risk-critical)' : 'var(--text)' ?>;"><?= h($flash) ?></p>
+    <div class="mod-section <?= $flashType === 'error' ? 'flash-err' : 'flash-ok' ?>" style="padding:14px 20px;margin-bottom:16px;">
+      <p style="margin:0;font-size:13px;color:<?= $flashType === 'error' ? '#ef4444' : 'var(--text)' ?>;"><?= h($flash) ?></p>
     </div>
     <?php endif; ?>
 
     <?php if (!$tableReady): ?>
-    <div class="panel">
-      <p style="margin:0;color:var(--text-muted);">Tablica <code>scanner_modules</code> ne postoji. Primijeni pending migracije u <a href="update.php">Admin &rarr; Update</a>.</p>
+    <!-- ── DB not ready ── -->
+    <div class="mod-section" style="padding:18px 20px;">
+      <p style="margin:0;color:var(--text-muted);font-size:13px;">
+        Tablica <code>scanner_modules</code> ne postoji.
+        Primijeni pending migracije u <a href="update.php">Admin &rarr; Update</a>.
+      </p>
     </div>
 
     <?php else: ?>
-    <div class="panel" style="padding:0;">
-      <div class="table-wrap" style="margin:0;">
-        <table>
+
+    <!-- ── 1. Upload module ZIP ── -->
+    <div class="mod-section">
+      <div class="mod-section-header">
+        <h3>Upload modula (ZIP)</h3>
+      </div>
+      <hr class="mod-divider">
+      <form method="post" action="modules_action.php" enctype="multipart/form-data">
+        <input type="hidden" name="action" value="upload">
+        <?= csrf_field() ?>
+        <div class="upload-form">
+          <input type="file" name="module_zip" accept=".zip" required style="font-size:13px;">
+          <button type="submit" class="btn btn-primary">Upload</button>
+        </div>
+      </form>
+      <div class="upload-hint">
+        ZIP mora sadržavati <code>module.php</code> manifest u korijenu s ključevima:
+        <code>module_key</code>, <code>name</code>, <code>version</code>, <code>description</code>.
+        <code>module_key</code> smije sadržavati samo mala slova, brojeve i crticu.
+      </div>
+    </div>
+
+    <!-- ── 2. Discover local modules ── -->
+    <div class="mod-section">
+      <div class="mod-section-header">
+        <h3>Discover lokalnih modula</h3>
+      </div>
+      <hr class="mod-divider">
+      <div style="padding:12px 20px;">
+        <form method="post" action="modules_action.php">
+          <input type="hidden" name="action" value="discover">
+          <?= csrf_field() ?>
+          <button type="submit" class="btn btn-ghost">Skeniraj modules/</button>
+        </form>
+        <p style="margin:8px 0 0;font-size:12px;color:var(--text-muted);">
+          Traži <code>modules/*/module.php</code> manifeste i prikazuje pronađene module.
+        </p>
+      </div>
+    </div>
+
+    <!-- ── 3. Available modules (discovered, not installed) ── -->
+    <div class="mod-section">
+      <div class="mod-section-header">
+        <h3>Dostupni moduli</h3>
+        <?php if (!empty($availableModules)): ?>
+          <span class="badge-count"><?= count($availableModules) ?></span>
+        <?php endif; ?>
+      </div>
+      <hr class="mod-divider">
+      <?php if (empty($availableModules)): ?>
+        <div class="mod-empty">
+          Nema dostupnih modula za instalaciju.
+          <?= is_dir($modulesDir) ? 'Direktorij <code>modules/</code> je prazan ili svi moduli su već instalirani.' : 'Direktorij <code>modules/</code> ne postoji.' ?>
+        </div>
+      <?php else: ?>
+        <table class="mod-table">
+          <thead>
+            <tr>
+              <th>Module</th>
+              <th>Key</th>
+              <th>Version</th>
+              <th>Description</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach ($availableModules as $mod): ?>
+            <tr>
+              <td><b><?= h($mod['name']) ?></b></td>
+              <td><code><?= h($mod['module_key']) ?></code></td>
+              <td><?= h($mod['version'] ?? '—') ?></td>
+              <td class="mod-desc"><?= h($mod['description'] ?? '') ?></td>
+              <td>
+                <form method="post" action="modules_action.php" style="display:inline;">
+                  <input type="hidden" name="action" value="install">
+                  <input type="hidden" name="module_key" value="<?= h($mod['module_key']) ?>">
+                  <?= csrf_field() ?>
+                  <button type="submit" class="btn btn-primary" style="font-size:12px;">Install</button>
+                </form>
+              </td>
+            </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+      <?php endif; ?>
+    </div>
+
+    <!-- ── 4. Installed modules ── -->
+    <div class="mod-section">
+      <div class="mod-section-header">
+        <h3>Instalirani moduli</h3>
+        <?php if (!empty($installedModules)): ?>
+          <span class="badge-count"><?= count($installedModules) ?></span>
+        <?php endif; ?>
+      </div>
+      <hr class="mod-divider">
+      <?php if (empty($installedModules)): ?>
+        <div class="mod-empty">No modules installed yet.</div>
+      <?php else: ?>
+        <table class="mod-table">
           <thead>
             <tr>
               <th>Module</th>
@@ -69,44 +220,39 @@ if (!empty($_SESSION['modules_flash'])) {
             </tr>
           </thead>
           <tbody>
-          <?php if (empty($modules)): ?>
-          <tr>
-            <td colspan="6" style="color:var(--text-muted);text-align:center;">No modules installed yet.</td>
-          </tr>
-          <?php else: ?>
-          <?php foreach ($modules as $mod): ?>
-          <tr>
-            <td><b><?= h($mod['name']) ?></b></td>
-            <td><code style="font-size:12px;"><?= h($mod['module_key']) ?></code></td>
-            <td><?= h($mod['version'] ?? '—') ?></td>
-            <td style="color:var(--text-muted);font-size:13px;"><?= h($mod['description'] ?? '') ?></td>
-            <td>
-              <?php if ($mod['active']): ?>
-                <span class="badge risk-low">Active</span>
-              <?php else: ?>
-                <span class="badge" style="background:var(--bg-alt);color:var(--text-muted);">Disabled</span>
-              <?php endif; ?>
-            </td>
-            <td>
-              <form method="post" action="modules_action.php" style="display:inline;">
-                <?= csrf_field() ?>
-                <input type="hidden" name="module_key" value="<?= h($mod['module_key']) ?>">
+            <?php foreach ($installedModules as $mod): ?>
+            <tr>
+              <td><b><?= h($mod['name']) ?></b></td>
+              <td><code><?= h($mod['module_key']) ?></code></td>
+              <td><?= h($mod['version'] ?? '—') ?></td>
+              <td class="mod-desc"><?= h($mod['description'] ?? '') ?></td>
+              <td>
                 <?php if ($mod['active']): ?>
-                  <input type="hidden" name="action" value="disable">
-                  <button type="submit" class="btn btn-ghost" style="font-size:12px;">Disable</button>
+                  <span class="badge risk-low">Active</span>
                 <?php else: ?>
-                  <input type="hidden" name="action" value="enable">
-                  <button type="submit" class="btn btn-primary" style="font-size:12px;">Enable</button>
+                  <span class="badge" style="background:var(--bg-alt,var(--bg));color:var(--text-muted);">Disabled</span>
                 <?php endif; ?>
-              </form>
-            </td>
-          </tr>
-          <?php endforeach; ?>
-          <?php endif; ?>
+              </td>
+              <td>
+                <form method="post" action="modules_action.php" style="display:inline;">
+                  <?= csrf_field() ?>
+                  <input type="hidden" name="module_key" value="<?= h($mod['module_key']) ?>">
+                  <?php if ($mod['active']): ?>
+                    <input type="hidden" name="action" value="disable">
+                    <button type="submit" class="btn btn-ghost" style="font-size:12px;">Disable</button>
+                  <?php else: ?>
+                    <input type="hidden" name="action" value="enable">
+                    <button type="submit" class="btn btn-primary" style="font-size:12px;">Enable</button>
+                  <?php endif; ?>
+                </form>
+              </td>
+            </tr>
+            <?php endforeach; ?>
           </tbody>
         </table>
-      </div>
+      <?php endif; ?>
     </div>
+
     <?php endif; ?>
 
   </div>

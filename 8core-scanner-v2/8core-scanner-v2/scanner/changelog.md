@@ -6,6 +6,39 @@ Verzioniranje slijedi [Semantic Versioning](https://semver.org/lang/hr/).
 
 ---
 
+## [2.6.6] — 2026-07-01
+
+### Added
+
+- **`admin/modules.php`** — puni Module Manager UI s četiri sekcije:
+  - **Upload modula (ZIP)** — forma za upload `.zip` modula
+  - **Discover lokalnih modula** — gumb za skeniranje `modules/*/module.php`
+  - **Dostupni moduli** — pronađeni u filesystemu koji nisu instalirani u bazu; Install gumb
+  - **Instalirani moduli** — zapisi iz `scanner_modules` tablice; Enable/Disable gumbi, Active/Disabled status
+
+- **`admin/modules_action.php`** — POST handler s pet akcija:
+  - **`upload`** — prima ZIP, path traversal provjera, provjera `module.php` manifesta,
+    extract u `modules/<module_key>/`; odbija ZIP bez valjanog manifesta
+  - **`discover`** — skenira `modules/*/module.php`, broji valjane manifeste, flash poruka
+  - **`install`** — čita manifest iz `modules/<module_key>/module.php`,
+    upisuje modul u `scanner_modules` via `scanner_module_install()` (upsert)
+  - **`enable`** — aktivira modul via `scanner_module_set_active()`
+  - **`disable`** — deaktivira modul via `scanner_module_set_active()`
+
+### Security
+
+- ZIP upload: path traversal provjera svih entryja (`..`, null byte, apsolutne putanje)
+- Odbijanje ZIP-a bez `module.php` manifesta
+- `module_key` strogo validiran: samo `[a-z0-9-]`, ne smije biti prazan
+- Odredišni direktorij (`modules/<key>/`) provjerava se da je unutar `modules/` baze (prefix check)
+- Manifest se učitava s `@include` — PHP ga izvršava u izoliranom scope-u (ne eval, ne unserialize)
+
+### Not changed
+
+- Nema Prescan modula, nema promjena u `scanner_worker.sh`, scan engine nepromijenjen
+
+---
+
 ## [2.6.5] — 2026-07-01
 
 ### Added
