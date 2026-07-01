@@ -39,9 +39,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // ── Detect post_max_size exceeded ──────────────────────────────────────────
     // When exceeded PHP silently empties $_POST and $_FILES — no upload error,
     // no action field, handler never runs. Catch it here via CONTENT_LENGTH.
-    $clen        = (int) ($_SERVER['CONTENT_LENGTH'] ?? 0);
-    $postMaxB    = _int_ini_bytes(ini_get('post_max_size'));
-    $uploadMaxB  = _int_ini_bytes(ini_get('upload_max_filesize'));
+    $clen     = (int) ($_SERVER['CONTENT_LENGTH'] ?? 0);
+    $postMaxB = _int_ini_bytes(ini_get('post_max_size'));
+    $skipHandlers = false;
+
     if ($clen > 0 && empty($_POST) && $clen > $postMaxB) {
         $_intMessages[] = [
             'type' => 'err',
@@ -49,20 +50,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     . 'exceeds post_max_size (' . ini_get('post_max_size') . '). '
                     . 'Increase post_max_size (and upload_max_filesize) in php.ini.',
         ];
-    } else {
+        $skipHandlers = true;
+    } elseif (!empty($_POST)) {
         // ── CSRF check ─────────────────────────────────────────────────────────
-        if (!empty($_POST)) {
-            $submitted = $_POST['csrf_token'] ?? '';
-            if (function_exists('csrf_enabled') && csrf_enabled()) {
-                if (!hash_equals(csrf_token(), $submitted)) {
-                    $_intMessages[] = ['type' => 'err', 'text' => 'Invalid CSRF token. Refresh the page and try again.'];
-                    goto render;
-                }
+        $submitted = $_POST['csrf_token'] ?? '';
+        if (function_exists('csrf_enabled') && csrf_enabled()) {
+            if (!hash_equals(csrf_token(), $submitted)) {
+                $_intMessages[] = ['type' => 'err', 'text' => 'Invalid CSRF token. Refresh the page and try again.'];
+                $skipHandlers = true;
             }
         }
     }
 
-    $postAction = trim($_POST['action'] ?? '');
+    $postAction = $skipHandlers ? '' : trim($_POST['action'] ?? '');
 
     // ── Create default directory structure ─────────────────────────────────────
     if ($postAction === 'create_repo_structure') {
@@ -241,10 +241,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         unset($_SESSION['8int_zip'][$token]);
         if ($stored && isset($stored['path'])) @unlink($stored['path']);
     }
-
-    } // end else (post_max_size check)
 }
-render:
 
 /**
  * Core extraction logic — validates ZIP, detects wrapper, creates target, extracts.
