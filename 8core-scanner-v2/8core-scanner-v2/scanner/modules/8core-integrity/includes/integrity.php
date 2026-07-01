@@ -492,19 +492,52 @@ function integrity_user_content_folders(string $software): array {
 // ── DB: integrity ignore list ──────────────────────────────────────────────────
 
 /**
+ * Creates scanner_integrity_ignores if it does not exist.
+ * Called once per page load before any ignore-table query.
+ */
+function integrity_ensure_tables(PDO $pdo): bool {
+    try {
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS `scanner_integrity_ignores` (
+               `id`               INT           NOT NULL AUTO_INCREMENT,
+               `origin_path`      VARCHAR(1024) NOT NULL,
+               `destination_path` VARCHAR(1024) NOT NULL,
+               `ignored_path`     VARCHAR(1024) NOT NULL,
+               `ignore_type`      VARCHAR(50)   NOT NULL DEFAULT \'extra_path\',
+               `note`             TEXT          NULL,
+               `created_at`       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               PRIMARY KEY (`id`),
+               KEY `idx_origin_path`      (`origin_path`(100)),
+               KEY `idx_destination_path` (`destination_path`(100)),
+               KEY `idx_ignored_path`     (`ignored_path`(100))
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+        return true;
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+/**
  * Returns array of ignored relative paths for a specific origin+destination pair.
+ * Returns empty array on any DB error.
  */
 function integrity_ignores_for(PDO $pdo, string $originPath, string $destPath): array {
-    $stmt = $pdo->prepare(
-        'SELECT ignored_path FROM scanner_integrity_ignores
-          WHERE origin_path = :o AND destination_path = :d'
-    );
-    $stmt->execute([':o' => $originPath, ':d' => $destPath]);
-    return array_column($stmt->fetchAll(), 'ignored_path');
+    try {
+        $stmt = $pdo->prepare(
+            'SELECT ignored_path FROM scanner_integrity_ignores
+              WHERE origin_path = :o AND destination_path = :d'
+        );
+        $stmt->execute([':o' => $originPath, ':d' => $destPath]);
+        return array_column($stmt->fetchAll(), 'ignored_path');
+    } catch (PDOException $e) {
+        return [];
+    }
 }
 
 /**
  * Adds an integrity ignore entry. Silently deduplicates.
+ * Ensures the table exists before writing.
  */
 function integrity_add_ignore(
     PDO    $pdo,
@@ -520,21 +553,27 @@ function integrity_add_ignore(
     $ignoreType = in_array($ignoreType, ['extra_path', 'missing_path'], true)
         ? $ignoreType : 'extra_path';
 
-    $check = $pdo->prepare(
-        'SELECT id FROM scanner_integrity_ignores
-          WHERE origin_path = :o AND destination_path = :d AND ignored_path = :i
-          LIMIT 1'
-    );
-    $check->execute([':o' => $originPath, ':d' => $destPath, ':i' => $ignoredPath]);
-    if ($check->fetchColumn()) return true;
+    integrity_ensure_tables($pdo);
 
-    $stmt = $pdo->prepare(
-        'INSERT INTO scanner_integrity_ignores
-           (origin_path, destination_path, ignored_path, ignore_type, note, created_at)
-         VALUES (:o, :d, :i, :t, :n, NOW())'
-    );
-    return $stmt->execute([':o' => $originPath, ':d' => $destPath, ':i' => $ignoredPath,
-                           ':t' => $ignoreType, ':n' => $note]);
+    try {
+        $check = $pdo->prepare(
+            'SELECT id FROM scanner_integrity_ignores
+              WHERE origin_path = :o AND destination_path = :d AND ignored_path = :i
+              LIMIT 1'
+        );
+        $check->execute([':o' => $originPath, ':d' => $destPath, ':i' => $ignoredPath]);
+        if ($check->fetchColumn()) return true;
+
+        $stmt = $pdo->prepare(
+            'INSERT INTO scanner_integrity_ignores
+               (origin_path, destination_path, ignored_path, ignore_type, note, created_at)
+             VALUES (:o, :d, :i, :t, :n, NOW())'
+        );
+        return $stmt->execute([':o' => $originPath, ':d' => $destPath, ':i' => $ignoredPath,
+                               ':t' => $ignoreType, ':n' => $note]);
+    } catch (PDOException $e) {
+        return false;
+    }
 }
 
 // ── Structural check ───────────────────────────────────────────────────────────

@@ -10,6 +10,9 @@
 
 require_once __DIR__ . '/../includes/integrity.php';
 
+// Ensure the integrity ignore table exists before any DB query in this module.
+integrity_ensure_tables($pdo);
+
 // ── State vars ─────────────────────────────────────────────────────────────────
 $_intMessages      = [];
 $_intShowRootCmd   = false;
