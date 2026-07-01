@@ -67,6 +67,28 @@ function rmdir_recursive(string $dir): void {
     rmdir($dir);
 }
 
+/**
+ * Recursively copies a directory tree. Returns true on success.
+ */
+function copy_recursive(string $src, string $dst): bool {
+    if (!is_dir($dst)) {
+        if (!mkdir($dst, 0755, true)) return false;
+    }
+    $iter = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($src, RecursiveDirectoryIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST
+    );
+    foreach ($iter as $item) {
+        $target = $dst . '/' . $iter->getSubPathName();
+        if ($item->isDir()) {
+            if (!is_dir($target) && !mkdir($target, 0755, true)) return false;
+        } else {
+            if (!copy($item->getRealPath(), $target)) return false;
+        }
+    }
+    return true;
+}
+
 $modulesBaseDir = realpath(__DIR__ . '/..') . '/modules';
 
 // ── ACTION: upload ─────────────────────────────────────────────────────────────
@@ -168,11 +190,17 @@ if ($action === 'upload') {
     }
 
     // Copy module files to modules/<module_key>/
+    // Use recursive copy instead of rename() — rename fails across filesystems (e.g. /tmp → web root).
     if (is_dir($destDir)) {
         rmdir_recursive($destDir);
     }
-    rename($moduleRootInTmp, $destDir);
+    $copied = copy_recursive($moduleRootInTmp, $destDir);
     rmdir_recursive($tmpDir);
+
+    if (!$copied) {
+        mod_flash('Greška kopiranja modula u modules/. Provjeri dozvole.', 'error');
+        mod_redirect();
+    }
 
     mod_flash('Modul "' . htmlspecialchars($manifest['name'], ENT_QUOTES, 'UTF-8') . '" (' . htmlspecialchars($moduleKey, ENT_QUOTES, 'UTF-8') . ') uploadoan u modules/. Možeš ga instalirati iz sekcije "Dostupni moduli".');
     mod_redirect();

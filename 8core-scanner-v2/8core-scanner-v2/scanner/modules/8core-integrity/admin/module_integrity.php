@@ -76,7 +76,7 @@ $_intWebUser = function_exists('posix_getpwuid') ? (posix_getpwuid(posix_geteuid
 <body>
 <div class="layout">
 
-<?php include __DIR__ . '/../../../../admin/sidebar.php'; ?>
+<?php include __DIR__ . '/../../../admin/sidebar.php'; ?>
 
 <div class="main">
   <div class="topbar">
