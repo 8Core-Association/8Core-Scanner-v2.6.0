@@ -1,12 +1,19 @@
 <?php
 /**
- * 8Core Scanner v2.6.7 — Admin sidebar
+ * 8Core Scanner v2.7.0 — Admin sidebar
  * (c) 2026 Tomislav Galić <tomislav@8core.hr>
  * Sva prava pridržana.
  */
 require_once __DIR__ . '/../includes/version.php';
 if (!function_exists('scanner_modules_all')) {
     require_once __DIR__ . '/../includes/modules.php';
+}
+
+// Bootstrap $pdo if not already available in the calling scope.
+// This covers the case where sidebar is included from a module admin page
+// that doesn't explicitly set $pdo before the include.
+if (!isset($pdo)) {
+    require_once __DIR__ . '/../includes/db.php';
 }
 
 $currentFile = basename($_SERVER['PHP_SELF']);
@@ -18,9 +25,11 @@ function sb_active($file) {
 // Collect admin_menu entries from active installed modules.
 $_sbModuleMenuItems = [];
 if (isset($pdo) && function_exists('scanner_modules_table_exists') && scanner_modules_table_exists($pdo)) {
+    $_sbModulesDir = realpath(__DIR__ . '/../modules');
     foreach (scanner_modules_all($pdo) as $mod) {
         if (!(int)$mod['active']) continue;
-        $manifestPath = __DIR__ . '/../modules/' . $mod['module_key'] . '/module.php';
+        if (!$_sbModulesDir) continue;
+        $manifestPath = $_sbModulesDir . '/' . $mod['module_key'] . '/module.php';
         $manifest = scanner_load_manifest($manifestPath);
         if (!$manifest) continue;
         foreach (scanner_manifest_menu_items($manifest) as $item) {

@@ -176,21 +176,27 @@ if ($action === 'upload') {
     }
 
     $moduleKey = $manifest['module_key'];
-    $destDir   = $modulesBaseDir . '/' . $moduleKey;
 
-    // Security: destination must be inside modulesBaseDir
+    // Resolve the modules base dir — create it first so realpath() works.
     if (!is_dir($modulesBaseDir)) {
         mkdir($modulesBaseDir, 0755, true);
     }
-    $realDest = realpath($modulesBaseDir) . '/' . $moduleKey;
-    if (strpos($realDest, realpath($modulesBaseDir)) !== 0) {
+    $resolvedBase = realpath($modulesBaseDir);
+    if (!$resolvedBase) {
+        rmdir_recursive($tmpDir);
+        mod_flash('Ne mogu razriješiti putanju modules/ direktorija.', 'error');
+        mod_redirect();
+    }
+    $destDir  = $resolvedBase . '/' . $moduleKey;
+
+    // Security: destination must be inside modulesBaseDir (path traversal guard).
+    if (strpos(realpath($resolvedBase . '/' . $moduleKey) ?: ($resolvedBase . '/' . $moduleKey), $resolvedBase . '/') !== 0) {
         rmdir_recursive($tmpDir);
         mod_flash('Neispravan odredišni direktorij.', 'error');
         mod_redirect();
     }
 
-    // Copy module files to modules/<module_key>/
-    // Use recursive copy instead of rename() — rename fails across filesystems (e.g. /tmp → web root).
+    // Overwrite existing module directory with contents from ZIP.
     if (is_dir($destDir)) {
         rmdir_recursive($destDir);
     }
@@ -202,10 +208,13 @@ if ($action === 'upload') {
         mod_redirect();
     }
 
-    // Re-read manifest from its installed location so DB gets the canonical version.
-    $installedManifest = load_manifest($destDir . '/module.php') ?: $manifest;
+    // Read manifest from the installed location — this is the canonical source for DB.
+    $installedManifest = load_manifest($destDir . '/module.php');
+    if (!$installedManifest) {
+        $installedManifest = $manifest; // fallback to in-memory manifest from ZIP
+    }
 
-    // If already installed in DB, update metadata (preserves active status).
+    // Always update DB if module is already installed (preserves active status).
     if (scanner_modules_table_exists($pdo) && scanner_module_get($pdo, $moduleKey)) {
         scanner_module_install(
             $pdo,
@@ -214,11 +223,19 @@ if ($action === 'upload') {
             $installedManifest['description'] ?? null,
             $installedManifest['version'] ?? null
         );
-        mod_flash('Modul "' . htmlspecialchars($installedManifest['name'], ENT_QUOTES, 'UTF-8') . '" ažuriran na v' . htmlspecialchars($installedManifest['version'] ?? '?', ENT_QUOTES, 'UTF-8') . '. Fajlovi i DB ažurirani.');
+        mod_flash(
+            'Modul "' . htmlspecialchars($installedManifest['name'], ENT_QUOTES, 'UTF-8') . '"'
+            . ' ažuriran na v' . htmlspecialchars($installedManifest['version'] ?? '?', ENT_QUOTES, 'UTF-8') . '.'
+            . ' Fajlovi i DB ažurirani.'
+        );
         mod_redirect();
     }
 
-    mod_flash('Modul "' . htmlspecialchars($manifest['name'], ENT_QUOTES, 'UTF-8') . '" (' . htmlspecialchars($moduleKey, ENT_QUOTES, 'UTF-8') . ') uploadoan u modules/. Možeš ga instalirati iz sekcije "Dostupni moduli".');
+    mod_flash(
+        'Modul "' . htmlspecialchars($manifest['name'], ENT_QUOTES, 'UTF-8') . '"'
+        . ' (' . htmlspecialchars($moduleKey, ENT_QUOTES, 'UTF-8') . ')'
+        . ' uploadoan u modules/. Instalirati ga iz sekcije "Dostupni moduli".'
+    );
     mod_redirect();
 }
 
