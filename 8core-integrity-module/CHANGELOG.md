@@ -1,5 +1,17 @@
 # 8Core Integrity — Changelog
 
+## [0.1.2] — 2026-07-01
+
+### Changed
+
+- `includes/integrity.php` — replaced flat `integrity_default_tree()` with `integrity_default_groups()` (grouped by app) and `integrity_default_dirs()` (flat list for mkdir)
+- `includes/integrity.php` — added `integrity_custom_dirs()` — reads existing subdirs of `custom/`
+- `includes/integrity.php` — added `integrity_create_custom_dir(string $name)` — creates a single custom folder with validation
+- `admin/module_integrity.php` — repository structure now displayed as grouped cards (Joomla, WordPress, WHMCS, PrestaShop, Custom) with disk-status indicators
+- `admin/module_integrity.php` — added "Add custom repository folder" form (pattern: `^[a-z0-9_-]+$`)
+- `admin/module_integrity.php` — root command output is now dynamically generated per action
+- `admin/module_integrity.php` — root cmd box uses amber/green colours (was dark theme)
+
 ## [0.1.1] — 2026-07-01
 
 ### Fixed

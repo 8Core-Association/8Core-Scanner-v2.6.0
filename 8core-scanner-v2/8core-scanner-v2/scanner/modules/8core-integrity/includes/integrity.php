@@ -7,17 +7,54 @@ function integrity_repo_root(): string {
     return '/home/8core_integrity/repo';
 }
 
-function integrity_default_tree(): array {
-    $root = integrity_repo_root();
+/**
+ * Returns the default grouped tree structure.
+ * Each group: ['label' => string, 'key' => string, 'versions' => string[]]
+ * Groups with no versions still get a parent directory created.
+ */
+function integrity_default_groups(): array {
     return [
-        $root . '/joomla/v3x',
-        $root . '/joomla/v4x',
-        $root . '/joomla/v5x',
-        $root . '/wordpress/v6x',
-        $root . '/wordpress/v7x',
-        $root . '/whmcs',
-        $root . '/prestashop',
+        ['label' => 'Joomla',     'key' => 'joomla',     'versions' => ['v3x', 'v4x', 'v5x']],
+        ['label' => 'WordPress',  'key' => 'wordpress',  'versions' => ['v6x', 'v7x']],
+        ['label' => 'WHMCS',      'key' => 'whmcs',      'versions' => []],
+        ['label' => 'PrestaShop', 'key' => 'prestashop', 'versions' => []],
+        ['label' => 'Custom',     'key' => 'custom',     'versions' => []],
     ];
+}
+
+/**
+ * Returns a flat list of all directories that must exist for the default tree.
+ */
+function integrity_default_dirs(): array {
+    $root = integrity_repo_root();
+    $dirs = [];
+    foreach (integrity_default_groups() as $g) {
+        $dirs[] = $root . '/' . $g['key'];
+        foreach ($g['versions'] as $v) {
+            $dirs[] = $root . '/' . $g['key'] . '/' . $v;
+        }
+    }
+    return $dirs;
+}
+
+/**
+ * Returns existing custom sub-directories inside custom/.
+ * Returns array of folder names (strings), sorted.
+ */
+function integrity_custom_dirs(): array {
+    $customDir = integrity_repo_root() . '/custom';
+    if (!is_dir($customDir)) {
+        return [];
+    }
+    $names = [];
+    foreach (scandir($customDir) ?: [] as $entry) {
+        if ($entry === '.' || $entry === '..') continue;
+        if (is_dir($customDir . '/' . $entry)) {
+            $names[] = $entry;
+        }
+    }
+    sort($names);
+    return $names;
 }
 
 /**
@@ -26,13 +63,29 @@ function integrity_default_tree(): array {
  */
 function integrity_ensure_repo_structure(): array {
     $results = [];
-    foreach (integrity_default_tree() as $dir) {
+    foreach (integrity_default_dirs() as $dir) {
         if (is_dir($dir)) {
             $results[] = ['path' => $dir, 'ok' => true, 'note' => 'already exists'];
             continue;
         }
         $created   = @mkdir($dir, 0755, true);
-        $results[] = ['path' => $dir, 'ok' => $created, 'note' => $created ? 'created' : 'failed (permission denied)'];
+        $results[] = ['path' => $dir, 'ok' => $created, 'note' => $created ? 'created' : 'failed'];
     }
     return $results;
+}
+
+/**
+ * Creates a single custom repository folder inside custom/.
+ * Returns ['ok' => bool, 'path' => string, 'note' => string].
+ */
+function integrity_create_custom_dir(string $name): array {
+    if (!preg_match('/^[a-z0-9_-]+$/', $name)) {
+        return ['ok' => false, 'path' => '', 'note' => 'invalid name'];
+    }
+    $path = integrity_repo_root() . '/custom/' . $name;
+    if (is_dir($path)) {
+        return ['ok' => true, 'path' => $path, 'note' => 'already exists'];
+    }
+    $ok = @mkdir($path, 0755, true);
+    return ['ok' => $ok, 'path' => $path, 'note' => $ok ? 'created' : 'failed'];
 }
