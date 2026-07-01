@@ -71,6 +71,13 @@ function sb_active($file) {
       Očisti rezultate
     </a>
 
+    <div class="sidebar-section-label" style="margin-top:14px;">Modules</div>
+
+    <a class="sidebar-link<?= sb_active('modules.php') ?>" href="modules.php">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="9" height="9" rx="1"/><rect x="13" y="2" width="9" height="9" rx="1"/><rect x="2" y="13" width="9" height="9" rx="1"/><path d="M13 17h4m-2-2v4"/></svg>
+      Modules
+    </a>
+
     <div class="sidebar-section-label" style="margin-top:14px;">Sustav</div>
 
     <a class="sidebar-link<?= sb_active('update.php') ?>" href="update.php">

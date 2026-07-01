@@ -6,6 +6,22 @@ Verzioniranje slijedi [Semantic Versioning](https://semver.org/lang/hr/).
 
 ---
 
+## [2.6.3] — 2026-07-01
+
+### Added
+
+- **`admin/modules.php`** — placeholder admin stranica "Modules":
+  - Uklopljena u postojeći admin layout (sidebar, topbar, auth)
+  - Prikazuje poruku: "Module manager will be available after database update."
+- **Admin sidebar** — dodan link "Modules" u novu sekciju "Modules" iznad sekcije "Sustav"
+
+### Not changed
+
+- Nema DB izmjena u ovom releaseu
+- Module manager akcije, tablice i logika planirani za sljedeći update
+
+---
+
 ## [2.6.2] — 2026-06-30
 
 ### Changed
