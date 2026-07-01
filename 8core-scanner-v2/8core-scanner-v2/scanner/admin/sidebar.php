@@ -21,16 +21,9 @@ if (isset($pdo) && function_exists('scanner_modules_table_exists') && scanner_mo
     foreach (scanner_modules_all($pdo) as $mod) {
         if (!(int)$mod['active']) continue;
         $manifestPath = __DIR__ . '/../modules/' . $mod['module_key'] . '/module.php';
-        if (!file_exists($manifestPath)) continue;
-        $manifest = @include $manifestPath;
-        if (!is_array($manifest) || empty($manifest['admin_menu'])) continue;
-        // Normalise: support both a single item ['label'=>,'url'=>] and a list of items.
-        $menuItems = $manifest['admin_menu'];
-        if (isset($menuItems['label']) && isset($menuItems['url'])) {
-            $menuItems = [$menuItems];
-        }
-        foreach ($menuItems as $item) {
-            if (empty($item['label']) || empty($item['url'])) continue;
+        $manifest = scanner_load_manifest($manifestPath);
+        if (!$manifest) continue;
+        foreach (scanner_manifest_menu_items($manifest) as $item) {
             $_sbModuleMenuItems[] = [
                 'label' => $item['label'],
                 'href'  => ltrim($item['url'], '/'),

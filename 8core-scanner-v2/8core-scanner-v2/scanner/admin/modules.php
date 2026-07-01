@@ -1,6 +1,6 @@
 <?php
 /**
- * 8Core Scanner v2.6.6 — Admin: Module Manager
+ * 8Core Scanner v2.7.0 — Admin: Module Manager
  * (c) 2026 Tomislav Galić <tomislav@8core.hr>
  * Sva prava pridržana.
  */
@@ -21,20 +21,19 @@ if (!empty($_SESSION['modules_flash'])) {
 }
 
 // ── Discover: fajlovi modula u modules/ ───────────────────────────────────────
-$modulesDir       = __DIR__ . '/../modules/';
+$modulesDir        = __DIR__ . '/../modules/';
 $discoveredModules = [];
 
 if (is_dir($modulesDir)) {
     foreach (glob($modulesDir . '*/module.php') ?: [] as $manifestPath) {
-        $manifest = @include $manifestPath;
-        if (!is_array($manifest)) continue;
-        $key = isset($manifest['module_key']) ? trim($manifest['module_key']) : '';
-        if (!preg_match('/^[a-z0-9\-]+$/', $key)) continue;
+        $manifest = scanner_load_manifest($manifestPath);
+        if (!$manifest) continue;
+        $key = $manifest['module_key'];
         $discoveredModules[$key] = [
-            'module_key'  => $key,
-            'name'        => $manifest['name']        ?? $key,
-            'version'     => $manifest['version']     ?? null,
-            'description' => $manifest['description'] ?? null,
+            'module_key'    => $key,
+            'name'          => $manifest['name'],
+            'version'       => $manifest['version']     ?? null,
+            'description'   => $manifest['description'] ?? null,
             'manifest_path' => $manifestPath,
         ];
     }
@@ -70,12 +69,15 @@ foreach ($discoveredModules as $key => $info) {
 .mod-table th { text-align:left; padding:8px 16px; font-size:11px; font-weight:700; color:var(--text-muted); text-transform:uppercase; letter-spacing:.05em; border-bottom:1px solid var(--border); }
 .mod-table td { padding:10px 16px; border-bottom:1px solid var(--bg); vertical-align:middle; }
 .mod-table tr:last-child td { border-bottom:none; }
-.mod-table code { font-size:11px; background:var(--bg); padding:2px 6px; border-radius:4px; }
+.mod-table code { font-size:11px; background:var(--bg); padding:2px 6px; border-radius:4px; font-family:var(--font-mono,monospace); }
 .mod-desc { color:var(--text-muted); font-size:12px; }
 .upload-form { padding:16px 20px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
 .upload-hint { padding:0 20px 16px; font-size:12px; color:var(--text-muted); }
 .flash-ok  { border-color:#22c55e; }
 .flash-err { border-color:#ef4444; }
+.dbg-row td { font-size:11px; color:var(--text-muted); background:var(--bg); padding:4px 16px; border-bottom:1px solid var(--border); }
+.dbg-ok  { color:#4ade80; font-weight:700; }
+.dbg-err { color:#f87171; font-weight:700; }
 </style>
 </head>
 <body>
@@ -167,11 +169,7 @@ foreach ($discoveredModules as $key => $info) {
         <table class="mod-table">
           <thead>
             <tr>
-              <th>Module</th>
-              <th>Key</th>
-              <th>Version</th>
-              <th>Description</th>
-              <th>Actions</th>
+              <th>Module</th><th>Key</th><th>Version</th><th>Description</th><th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -206,14 +204,15 @@ foreach ($discoveredModules as $key => $info) {
       </div>
       <hr class="mod-divider">
       <?php if (empty($installedModules)): ?>
-        <div class="mod-empty">No modules installed yet.</div>
+        <div class="mod-empty">Nema instaliranih modula.</div>
       <?php else: ?>
         <table class="mod-table">
           <thead>
             <tr>
               <th>Module</th>
               <th>Key</th>
-              <th>Version</th>
+              <th>DB Version</th>
+              <th>Manifest Version</th>
               <th>Description</th>
               <th>Status</th>
               <th>Actions</th>
@@ -222,37 +221,34 @@ foreach ($discoveredModules as $key => $info) {
           <tbody>
             <?php foreach ($installedModules as $mod): ?>
             <?php
-            $_modOpenUrl = null;
-            if ((int)$mod['active']) {
-                $_modManifestPath = __DIR__ . '/../modules/' . $mod['module_key'] . '/module.php';
-                if (file_exists($_modManifestPath)) {
-                    $_modManifest = @include $_modManifestPath;
-                    if (is_array($_modManifest) && !empty($_modManifest['admin_menu'][0]['url'])) {
-                        $_modOpenUrl = $_modManifest['admin_menu'][0]['url'];
-                    }
-                }
-            }
+            $dbgManifestPath = __DIR__ . '/../modules/' . $mod['module_key'] . '/module.php';
+            $dbgReadable     = is_file($dbgManifestPath) && is_readable($dbgManifestPath);
+            $dbgManifest     = $dbgReadable ? scanner_load_manifest($dbgManifestPath) : null;
+            $dbgManifestVer  = $dbgManifest['version'] ?? null;
+            $dbgMenuItems    = $dbgManifest ? scanner_manifest_menu_items($dbgManifest) : [];
+            $modOpenUrl      = (!empty($dbgMenuItems) && (int)$mod['active']) ? $dbgMenuItems[0]['url'] : null;
             ?>
             <tr>
               <td><b><?= h($mod['name']) ?></b></td>
               <td><code><?= h($mod['module_key']) ?></code></td>
               <td><?= h($mod['version'] ?? '—') ?></td>
+              <td><?= $dbgManifestVer !== null ? h($dbgManifestVer) : '<span style="color:var(--text-muted)">—</span>' ?></td>
               <td class="mod-desc"><?= h($mod['description'] ?? '') ?></td>
               <td>
-                <?php if ($mod['active']): ?>
+                <?php if ((int)$mod['active']): ?>
                   <span class="badge risk-low">Active</span>
                 <?php else: ?>
                   <span class="badge" style="background:var(--bg-alt,var(--bg));color:var(--text-muted);">Disabled</span>
                 <?php endif; ?>
               </td>
               <td style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-                <?php if ($_modOpenUrl): ?>
-                  <a href="<?= htmlspecialchars($_modOpenUrl, ENT_QUOTES, 'UTF-8') ?>" class="btn btn-ghost" style="font-size:12px;">Open</a>
+                <?php if ($modOpenUrl): ?>
+                  <a href="<?= htmlspecialchars($modOpenUrl, ENT_QUOTES, 'UTF-8') ?>" class="btn btn-ghost" style="font-size:12px;">Open</a>
                 <?php endif; ?>
                 <form method="post" action="modules_action.php" style="display:inline;">
                   <?= csrf_field() ?>
                   <input type="hidden" name="module_key" value="<?= h($mod['module_key']) ?>">
-                  <?php if ($mod['active']): ?>
+                  <?php if ((int)$mod['active']): ?>
                     <input type="hidden" name="action" value="disable">
                     <button type="submit" class="btn btn-ghost" style="font-size:12px;">Disable</button>
                   <?php else: ?>
@@ -260,6 +256,21 @@ foreach ($discoveredModules as $key => $info) {
                     <button type="submit" class="btn btn-primary" style="font-size:12px;">Enable</button>
                   <?php endif; ?>
                 </form>
+              </td>
+            </tr>
+            <!-- ── debug row ── -->
+            <tr class="dbg-row">
+              <td colspan="7">
+                Manifest path: <code><?= h($dbgManifestPath) ?></code>
+                &nbsp;|&nbsp;
+                Readable: <span class="<?= $dbgReadable ? 'dbg-ok' : 'dbg-err' ?>"><?= $dbgReadable ? 'YES' : 'NO' ?></span>
+                &nbsp;|&nbsp;
+                Manifest loaded: <span class="<?= $dbgManifest ? 'dbg-ok' : 'dbg-err' ?>"><?= $dbgManifest ? 'YES' : 'NO' ?></span>
+                &nbsp;|&nbsp;
+                Admin menu: <span class="<?= !empty($dbgMenuItems) ? 'dbg-ok' : 'dbg-err' ?>"><?= !empty($dbgMenuItems) ? 'YES (' . count($dbgMenuItems) . ' item)' : 'NO' ?></span>
+                <?php if (!empty($dbgMenuItems)): ?>
+                  &nbsp;|&nbsp; URL: <code><?= h($dbgMenuItems[0]['url']) ?></code>
+                <?php endif; ?>
               </td>
             </tr>
             <?php endforeach; ?>

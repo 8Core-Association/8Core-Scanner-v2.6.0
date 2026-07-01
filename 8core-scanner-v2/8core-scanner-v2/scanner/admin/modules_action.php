@@ -202,20 +202,20 @@ if ($action === 'upload') {
         mod_redirect();
     }
 
-    // If module is already installed in DB, update its metadata (name, description, version).
-    if (scanner_modules_table_exists($pdo)) {
-        $existing = scanner_module_get($pdo, $moduleKey);
-        if ($existing) {
-            scanner_module_install(
-                $pdo,
-                $manifest['module_key'],
-                $manifest['name'],
-                $manifest['description'] ?? null,
-                $manifest['version'] ?? null
-            );
-            mod_flash('Modul "' . htmlspecialchars($manifest['name'], ENT_QUOTES, 'UTF-8') . '" (' . htmlspecialchars($moduleKey, ENT_QUOTES, 'UTF-8') . ') ažuriran na v' . htmlspecialchars($manifest['version'] ?? '?', ENT_QUOTES, 'UTF-8') . '.');
-            mod_redirect();
-        }
+    // Re-read manifest from its installed location so DB gets the canonical version.
+    $installedManifest = load_manifest($destDir . '/module.php') ?: $manifest;
+
+    // If already installed in DB, update metadata (preserves active status).
+    if (scanner_modules_table_exists($pdo) && scanner_module_get($pdo, $moduleKey)) {
+        scanner_module_install(
+            $pdo,
+            $installedManifest['module_key'],
+            $installedManifest['name'],
+            $installedManifest['description'] ?? null,
+            $installedManifest['version'] ?? null
+        );
+        mod_flash('Modul "' . htmlspecialchars($installedManifest['name'], ENT_QUOTES, 'UTF-8') . '" ažuriran na v' . htmlspecialchars($installedManifest['version'] ?? '?', ENT_QUOTES, 'UTF-8') . '. Fajlovi i DB ažurirani.');
+        mod_redirect();
     }
 
     mod_flash('Modul "' . htmlspecialchars($manifest['name'], ENT_QUOTES, 'UTF-8') . '" (' . htmlspecialchars($moduleKey, ENT_QUOTES, 'UTF-8') . ') uploadoan u modules/. Možeš ga instalirati iz sekcije "Dostupni moduli".');
