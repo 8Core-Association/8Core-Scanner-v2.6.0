@@ -1713,6 +1713,187 @@ function integrity_clear_results(PDO $pdo, string $mode, int $runId = 0, string 
     }
 }
 
+// ── Run management helpers ─────────────────────────────────────────────────────
+
+/**
+ * Returns all runs for a destination path, newest first.
+ */
+function integrity_load_runs_for_dest(PDO $pdo, string $dest): array {
+    try {
+        $stmt = $pdo->prepare(
+            'SELECT id, created_at, origin_path, destination_path, software, check_mode,
+                    total, suspicious, warnings, info
+               FROM scanner_integrity_runs
+              WHERE destination_path = :d
+              ORDER BY id DESC'
+        );
+        $stmt->execute([':d' => $dest]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        return [];
+    }
+}
+
+/**
+ * Returns the most recent run across all destinations, or null if none exist.
+ */
+function integrity_load_latest_run(PDO $pdo): ?array {
+    try {
+        $stmt = $pdo->query('SELECT * FROM scanner_integrity_runs ORDER BY id DESC LIMIT 1');
+        $row  = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    } catch (PDOException $e) {
+        return null;
+    }
+}
+
+/**
+ * Returns the most recent run for a specific destination, or null if none.
+ */
+function integrity_load_latest_run_for_dest(PDO $pdo, string $dest): ?array {
+    try {
+        $stmt = $pdo->prepare(
+            'SELECT * FROM scanner_integrity_runs WHERE destination_path = :d ORDER BY id DESC LIMIT 1'
+        );
+        $stmt->execute([':d' => $dest]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    } catch (PDOException $e) {
+        return null;
+    }
+}
+
+/**
+ * Deletes only the results and associated actions for a run — keeps the run row.
+ */
+function integrity_clear_run_results_only(PDO $pdo, int $runId): bool {
+    try {
+        $pdo->prepare(
+            'DELETE a FROM scanner_integrity_actions a
+               JOIN scanner_integrity_results r ON r.id = a.result_id
+              WHERE r.run_id = :rid'
+        )->execute([':rid' => $runId]);
+        $pdo->prepare('DELETE FROM scanner_integrity_results WHERE run_id = :rid')->execute([':rid' => $runId]);
+        return true;
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+/**
+ * Fully deletes a run: actions → results → run row.
+ * Optionally deletes the run log file and/or action log files.
+ */
+function integrity_delete_run(PDO $pdo, int $runId, bool $alsoRunLog = false, bool $alsoActionLogs = false): bool {
+    try {
+        if ($alsoActionLogs) {
+            $stmt = $pdo->prepare(
+                'SELECT a.id FROM scanner_integrity_actions a
+                   JOIN scanner_integrity_results r ON r.id = a.result_id
+                  WHERE r.run_id = :rid'
+            );
+            $stmt->execute([':rid' => $runId]);
+            foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $aId) {
+                $p = integrity_action_log_path((int)$aId);
+                if (file_exists($p)) @unlink($p);
+            }
+        }
+        $pdo->prepare(
+            'DELETE a FROM scanner_integrity_actions a
+               JOIN scanner_integrity_results r ON r.id = a.result_id
+              WHERE r.run_id = :rid'
+        )->execute([':rid' => $runId]);
+        $pdo->prepare('DELETE FROM scanner_integrity_results WHERE run_id = :rid')->execute([':rid' => $runId]);
+        $pdo->prepare('DELETE FROM scanner_integrity_runs WHERE id = :rid')->execute([':rid' => $runId]);
+        if ($alsoRunLog) {
+            $p = integrity_run_log_path($runId);
+            if (file_exists($p)) @unlink($p);
+        }
+        return true;
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+/**
+ * Deletes all runs and results for a destination path.
+ * Optionally deletes associated log files.
+ */
+function integrity_delete_dest_runs(PDO $pdo, string $dest, bool $alsoRunLogs = false, bool $alsoActionLogs = false): bool {
+    try {
+        $runIds = [];
+        if ($alsoRunLogs || $alsoActionLogs) {
+            $st = $pdo->prepare('SELECT id FROM scanner_integrity_runs WHERE destination_path = :d');
+            $st->execute([':d' => $dest]);
+            $runIds = $st->fetchAll(PDO::FETCH_COLUMN);
+        }
+        if ($alsoActionLogs) {
+            foreach ($runIds as $runId) {
+                $st = $pdo->prepare(
+                    'SELECT a.id FROM scanner_integrity_actions a
+                       JOIN scanner_integrity_results r ON r.id = a.result_id
+                      WHERE r.run_id = :rid'
+                );
+                $st->execute([':rid' => $runId]);
+                foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $aId) {
+                    $p = integrity_action_log_path((int)$aId);
+                    if (file_exists($p)) @unlink($p);
+                }
+            }
+        }
+        $pdo->prepare(
+            'DELETE a FROM scanner_integrity_actions a
+               JOIN scanner_integrity_results r ON r.id = a.result_id
+               JOIN scanner_integrity_runs ru ON ru.id = r.run_id
+              WHERE ru.destination_path = :d'
+        )->execute([':d' => $dest]);
+        $pdo->prepare(
+            'DELETE r FROM scanner_integrity_results r
+               JOIN scanner_integrity_runs ru ON ru.id = r.run_id
+              WHERE ru.destination_path = :d'
+        )->execute([':d' => $dest]);
+        $pdo->prepare('DELETE FROM scanner_integrity_runs WHERE destination_path = :d')->execute([':d' => $dest]);
+        if ($alsoRunLogs) {
+            foreach ($runIds as $runId) {
+                $p = integrity_run_log_path((int)$runId);
+                if (file_exists($p)) @unlink($p);
+            }
+        }
+        return true;
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
+/**
+ * Deletes ALL integrity runs and results across all destinations.
+ * Does NOT delete: repo hashes, ignores, exclusion templates, trash files.
+ */
+function integrity_delete_all_runs(PDO $pdo, bool $alsoRunLogs = false, bool $alsoActionLogs = false): bool {
+    try {
+        if ($alsoActionLogs) {
+            $st = $pdo->query('SELECT id FROM scanner_integrity_actions');
+            foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $aId) {
+                $p = integrity_action_log_path((int)$aId);
+                if (file_exists($p)) @unlink($p);
+            }
+        }
+        if ($alsoRunLogs) {
+            $st = $pdo->query('SELECT id FROM scanner_integrity_runs');
+            foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $runId) {
+                $p = integrity_run_log_path((int)$runId);
+                if (file_exists($p)) @unlink($p);
+            }
+        }
+        $pdo->exec('DELETE FROM scanner_integrity_actions');
+        $pdo->exec('DELETE FROM scanner_integrity_results');
+        $pdo->exec('DELETE FROM scanner_integrity_runs');
+        return true;
+    } catch (PDOException $e) {
+        return false;
+    }
+}
+
 // ── Hash-based integrity check ─────────────────────────────────────────────────
 
 /**

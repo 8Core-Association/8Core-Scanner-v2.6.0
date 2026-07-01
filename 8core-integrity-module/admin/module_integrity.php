@@ -26,6 +26,7 @@ $_intRunMeta      = null;   // run row from DB
 $_intRunResults   = null;   // array of result rows from DB (null = not loaded)
 $_intRunFilters   = [];     // active filter values [type, severity, status, path, ids, all_runs]
 $_intDeepResultId = 0;      // result_id from deep-link ?result_id=N (0 = none)
+$_intRunsForDest  = [];     // all runs for current destination (for run selector dropdown)
 $_intBulkConfirm  = null;   // bulk preview data before destructive execute
 $_intCheckOrigin  = '';
 $_intCheckDest    = '';
@@ -460,7 +461,85 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // ── Clear integrity results ────────────────────────────────────────────────
+    // ── Clear / delete integrity run data ─────────────────────────────────────
+    if ($postAction === 'clear_run_results_only') {
+        $clearRunId    = (int) ($_POST['clear_run_id'] ?? 0);
+        $alsoRunLog    = !empty($_POST['also_run_log']);
+        if ($clearRunId <= 0) {
+            _int_flash_set('err', 'Invalid run ID.');
+        } else {
+            $ok = integrity_clear_run_results_only($pdo, $clearRunId);
+            if ($alsoRunLog) { $lp = integrity_run_log_path($clearRunId); if (file_exists($lp)) @unlink($lp); }
+            _int_flash_set($ok ? 'ok' : 'err', $ok
+                ? 'Results for Run #' . $clearRunId . ' cleared. Run record is retained.'
+                : 'Failed to clear results.');
+        }
+        header('Location: ' . _int_build_check_url($clearRunId));
+        exit;
+    }
+
+    if ($postAction === 'delete_run') {
+        $delRunId      = (int) ($_POST['clear_run_id'] ?? 0);
+        $delDest       = trim($_POST['clear_dest'] ?? '');
+        $alsoRunLog    = !empty($_POST['also_run_log']);
+        $alsoActionLog = !empty($_POST['also_action_log']);
+        if ($delRunId <= 0) {
+            _int_flash_set('err', 'Invalid run ID.');
+            header('Location: module.php?module=8core-integrity&page=module_integrity&tab=check');
+            exit;
+        }
+        $ok = integrity_delete_run($pdo, $delRunId, $alsoRunLog, $alsoActionLog);
+        if ($ok) {
+            _int_flash_set('ok', 'Run #' . $delRunId . ' deleted.');
+            $nextRun = ($delDest !== '')
+                ? integrity_load_latest_run_for_dest($pdo, $delDest)
+                : integrity_load_latest_run($pdo);
+            if ($nextRun) {
+                header('Location: ' . _int_build_check_url((int)$nextRun['id']));
+            } else {
+                header('Location: module.php?module=8core-integrity&page=module_integrity&tab=check');
+            }
+        } else {
+            _int_flash_set('err', 'Failed to delete run.');
+            header('Location: ' . _int_build_check_url($delRunId));
+        }
+        exit;
+    }
+
+    if ($postAction === 'delete_dest_runs') {
+        $delDest       = trim($_POST['clear_dest'] ?? '');
+        $alsoRunLog    = !empty($_POST['also_run_log']);
+        $alsoActionLog = !empty($_POST['also_action_log']);
+        if ($delDest === '') {
+            _int_flash_set('err', 'No destination specified.');
+        } else {
+            $ok = integrity_delete_dest_runs($pdo, $delDest, $alsoRunLog, $alsoActionLog);
+            _int_flash_set($ok ? 'ok' : 'err', $ok
+                ? 'All runs for "' . $delDest . '" deleted.'
+                : 'Failed to delete runs for destination.');
+        }
+        header('Location: module.php?module=8core-integrity&page=module_integrity&tab=check');
+        exit;
+    }
+
+    if ($postAction === 'delete_all_runs') {
+        $confirmText   = trim($_POST['confirm_text'] ?? '');
+        $alsoRunLog    = !empty($_POST['also_run_log']);
+        $alsoActionLog = !empty($_POST['also_action_log']);
+        if ($confirmText !== 'DELETE ALL INTEGRITY RESULTS') {
+            _int_flash_set('err', 'Confirmation text did not match. Nothing was deleted.');
+            header('Location: module.php?module=8core-integrity&page=module_integrity&tab=check');
+            exit;
+        }
+        $ok = integrity_delete_all_runs($pdo, $alsoRunLog, $alsoActionLog);
+        _int_flash_set($ok ? 'ok' : 'err', $ok
+            ? 'All Integrity run results deleted.'
+            : 'Failed to delete all runs.');
+        header('Location: module.php?module=8core-integrity&page=module_integrity&tab=check');
+        exit;
+    }
+
+    // ── Clear integrity results (legacy — kept for safety) ────────────────────
     if ($postAction === 'clear_results') {
         $clearMode   = trim($_POST['clear_mode']   ?? '');
         $clearRunId  = (int) ($_POST['clear_run_id']  ?? 0);
@@ -1147,15 +1226,23 @@ if (!isset($_intBulkConfirm) || $_intBulkConfirm === null) {
         $_intRunMeta    = integrity_load_run($pdo, $_intRunId);
         $_intRunFilters = _int_filters_from_get();
         if ($_intRunMeta) {
-            $_intRunResults = integrity_load_results($pdo, $_intRunId, $_intRunFilters);
-            $_intCheckOrigin  = $_intRunMeta['origin_path'];
-            $_intCheckDest    = $_intRunMeta['destination_path'];
-            $_intDetSoftware  = $_intRunMeta['software'] ?? '';
+            $_intRunResults  = integrity_load_results($pdo, $_intRunId, $_intRunFilters);
+            $_intCheckOrigin = $_intRunMeta['origin_path'];
+            $_intCheckDest   = $_intRunMeta['destination_path'];
+            $_intDetSoftware = $_intRunMeta['software'] ?? '';
+            $_intRunsForDest = integrity_load_runs_for_dest($pdo, $_intCheckDest);
         }
     } elseif (!empty($_GET['fi']) || !empty($_GET['fall'])) {
         // all_runs ID search with no run_id
         $_intRunFilters = _int_filters_from_get();
         $_intRunResults = integrity_load_results($pdo, 0, $_intRunFilters);
+    } elseif (($_GET['tab'] ?? '') === 'check') {
+        // Auto-load latest run when navigating to check tab with no explicit run_id
+        $__latestRun = integrity_load_latest_run($pdo);
+        if ($__latestRun) {
+            header('Location: ' . _int_build_check_url((int)$__latestRun['id']));
+            exit;
+        }
     }
 
     // Track the deep-link result id for JS auto-open
@@ -1325,6 +1412,36 @@ require __DIR__ . '/../../../includes/version.php';
 .int-run-bar-item { display:flex; flex-direction:column; min-width:0; }
 .int-run-bar-sep { border-left:1px solid var(--border); height:28px; align-self:center; }
 .int-run-bar-actions { margin-left:auto; display:flex; gap:6px; }
+
+/* ── Run selector ── */
+.int-run-selector-bar { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+.int-run-selector-label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-muted); white-space:nowrap; }
+.int-run-select { padding:5px 9px; background:#fff; border:1px solid var(--border); border-radius:5px; font-size:12px; color:var(--text); outline:none; cursor:pointer; max-width:480px; transition:border-color .12s; }
+.int-run-select:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.15); }
+
+/* ── Manage run data panel ── */
+.int-manage-run { margin-bottom:14px; border:1px solid var(--border); border-radius:8px; background:var(--surface2); }
+.int-manage-run-summary { padding:9px 14px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--text-muted); cursor:pointer; user-select:none; list-style:none; display:flex; align-items:center; gap:6px; }
+.int-manage-run-summary::-webkit-details-marker { display:none; }
+.int-manage-run-summary::before { content:'\25B6'; font-size:9px; display:inline-block; transition:transform .15s; }
+.int-manage-run[open] .int-manage-run-summary::before { transform:rotate(90deg); }
+.int-manage-run-body { padding:12px 14px; display:flex; flex-direction:column; gap:14px; border-top:1px solid var(--border); }
+.int-manage-action { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-start; padding:10px 12px; background:#fff; border:1px solid var(--border); border-radius:6px; }
+.int-manage-action-nuke { border-color:#fca5a5; background:#fff5f5; }
+.int-manage-action-info { flex:1 1 260px; min-width:0; }
+.int-manage-action-title { font-size:12px; font-weight:700; color:var(--text); margin-bottom:3px; }
+.int-manage-action-desc { font-size:11px; color:var(--text-muted); line-height:1.5; }
+.int-manage-action-desc code { font-family:var(--font-mono,monospace); background:#f1f5f9; padding:1px 4px; border-radius:3px; font-size:10px; word-break:break-all; }
+.int-manage-action-form { display:flex; flex-direction:column; gap:5px; align-items:flex-start; flex-shrink:0; }
+.int-manage-cb { display:flex; align-items:center; gap:5px; font-size:11px; color:var(--text-muted); cursor:pointer; }
+.int-manage-confirm-input { padding:6px 9px; border:1px solid #fca5a5; border-radius:5px; font-size:12px; width:260px; outline:none; }
+.int-manage-confirm-input:focus { border-color:#dc2626; box-shadow:0 0 0 3px rgba(220,38,38,.12); }
+.int-manage-btn-warn   { font-size:11px; padding:5px 12px; background:#fff; border:1px solid #fde68a; color:#92400e; border-radius:5px; cursor:pointer; transition:background .12s; margin-top:4px; }
+.int-manage-btn-warn:hover { background:#fef9c3; }
+.int-manage-btn-danger { font-size:11px; padding:5px 12px; background:#fff; border:1px solid #fca5a5; color:#dc2626; border-radius:5px; cursor:pointer; transition:background .12s; margin-top:4px; }
+.int-manage-btn-danger:hover { background:#fee2e2; }
+.int-manage-btn-nuke   { font-size:11px; padding:5px 12px; background:#dc2626; border:1px solid #b91c1c; color:#fff; border-radius:5px; cursor:pointer; transition:background .12s; margin-top:4px; }
+.int-manage-btn-nuke:hover { background:#b91c1c; }
 
 /* ── Filter bar ── */
 .int-filter-bar { display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px; padding:10px 14px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; margin-bottom:14px; }
@@ -2457,8 +2574,21 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
         ?>
         <div class="int-check-results">
 
-          <!-- Run info bar -->
-          <div class="int-run-bar">
+          <!-- Run selector -->
+          <?php if (count($_intRunsForDest) > 1): ?>
+          <div class="int-run-selector-bar">
+            <span class="int-run-selector-label">Active run:</span>
+            <select id="int-run-select" class="int-run-select">
+              <?php foreach ($_intRunsForDest as $__rs): ?>
+              <option value="<?= (int)$__rs['id'] ?>" <?= (int)$__rs['id'] === $_intRunId ? 'selected' : '' ?>>
+                Run #<?= (int)$__rs['id'] ?>
+                &mdash; <?= h(date('Y-m-d H:i', strtotime($__rs['created_at']))) ?>
+                &mdash; <?= (int)$__rs['total'] ?> results
+              </option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <?php endif; ?>
             <div class="int-run-bar-item">
               <div class="int-run-bar-label">Run #<?= (int)$meta['id'] ?></div>
               <div class="int-run-bar-val"><?= h(date('Y-m-d H:i', strtotime($meta['created_at']))) ?></div>
@@ -2547,16 +2677,6 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
             </div>
             <?php endif; ?>
             <div class="int-run-bar-actions">
-              <form method="post" action="<?= h($_intTabBase) ?>&tab=check" style="display:inline;">
-                <input type="hidden" name="action"       value="clear_results">
-                <input type="hidden" name="clear_mode"   value="run">
-                <input type="hidden" name="clear_run_id" value="<?= (int)$_intRunId ?>">
-                <?= csrf_field() ?>
-                <button type="submit" class="btn btn-ghost" style="font-size:11px;padding:4px 10px;color:#dc2626;border-color:#fca5a5;"
-                        onclick="return confirm('Delete all results for Run #<?= (int)$_intRunId ?>? This cannot be undone.')">
-                  Clear run
-                </button>
-              </form>
               <?php
                 $_intRunLogPath = integrity_run_log_path((int)$_intRunId);
                 if (file_exists($_intRunLogPath)):
@@ -2577,6 +2697,98 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
           <?php if (file_exists(integrity_run_log_path((int)$_intRunId))): ?>
           <div class="int-log-panel" id="int-run-log-panel" style="display:none;margin-bottom:12px;"></div>
           <?php endif; ?>
+
+          <!-- Manage run data -->
+          <details class="int-manage-run">
+            <summary class="int-manage-run-summary">Manage run data</summary>
+            <div class="int-manage-run-body">
+
+              <!-- 1: Clear current run results -->
+              <div class="int-manage-action">
+                <div class="int-manage-action-info">
+                  <div class="int-manage-action-title">Clear current run results</div>
+                  <div class="int-manage-action-desc">Deletes all result rows for Run #<?= (int)$_intRunId ?>. The run record itself is kept with 0 results.</div>
+                </div>
+                <form method="post" action="<?= h($_intTabBase) ?>&tab=check" class="int-manage-action-form">
+                  <input type="hidden" name="action"       value="clear_run_results_only">
+                  <input type="hidden" name="clear_run_id" value="<?= (int)$_intRunId ?>">
+                  <?= csrf_field() ?>
+                  <label class="int-manage-cb"><input type="checkbox" name="also_run_log" value="1"> Also delete run log file</label>
+                  <button type="submit" class="btn int-manage-btn-warn"
+                          onclick="return confirm('Clear all results for Run #<?= (int)$_intRunId ?>? The run record will remain with 0 results.')">
+                    Clear current run results
+                  </button>
+                </form>
+              </div>
+
+              <!-- 2: Delete current run -->
+              <div class="int-manage-action">
+                <div class="int-manage-action-info">
+                  <div class="int-manage-action-title">Delete current run</div>
+                  <div class="int-manage-action-desc">Permanently deletes Run #<?= (int)$_intRunId ?> together with all its results and queued actions.</div>
+                </div>
+                <form method="post" action="<?= h($_intTabBase) ?>&tab=check" class="int-manage-action-form">
+                  <input type="hidden" name="action"       value="delete_run">
+                  <input type="hidden" name="clear_run_id" value="<?= (int)$_intRunId ?>">
+                  <input type="hidden" name="clear_dest"   value="<?= h($meta['destination_path']) ?>">
+                  <?= csrf_field() ?>
+                  <label class="int-manage-cb"><input type="checkbox" name="also_run_log"    value="1"> Also delete run log file</label>
+                  <label class="int-manage-cb"><input type="checkbox" name="also_action_log" value="1"> Also delete action log files</label>
+                  <button type="submit" class="btn int-manage-btn-danger"
+                          onclick="return confirm('Permanently delete Run #<?= (int)$_intRunId ?> and all its results? This cannot be undone.')">
+                    Delete current run
+                  </button>
+                </form>
+              </div>
+
+              <!-- 3: Delete all runs for destination -->
+              <div class="int-manage-action">
+                <div class="int-manage-action-info">
+                  <div class="int-manage-action-title">Delete all runs for this destination</div>
+                  <div class="int-manage-action-desc">Deletes every run and result for <code><?= h($meta['destination_path']) ?></code>.</div>
+                </div>
+                <form method="post" action="<?= h($_intTabBase) ?>&tab=check" class="int-manage-action-form">
+                  <input type="hidden" name="action"     value="delete_dest_runs">
+                  <input type="hidden" name="clear_dest" value="<?= h($meta['destination_path']) ?>">
+                  <?= csrf_field() ?>
+                  <label class="int-manage-cb"><input type="checkbox" name="also_run_log"    value="1"> Also delete run log files</label>
+                  <label class="int-manage-cb"><input type="checkbox" name="also_action_log" value="1"> Also delete action log files</label>
+                  <button type="submit" class="btn int-manage-btn-danger"
+                          onclick="return confirm('Delete ALL runs for \'<?= addslashes(h($meta['destination_path'])) ?>\'? This cannot be undone.')">
+                    Delete all runs for this destination
+                  </button>
+                </form>
+              </div>
+
+              <!-- 4: Delete all Integrity run results -->
+              <div class="int-manage-action int-manage-action-nuke">
+                <div class="int-manage-action-info">
+                  <div class="int-manage-action-title">Delete all Integrity run results</div>
+                  <div class="int-manage-action-desc">
+                    Permanently deletes <strong>all</strong> runs and results across <strong>all</strong> destinations.
+                    Does <em>not</em> delete repo hashes, ignores, exclusion templates, or trash files.
+                  </div>
+                </div>
+                <form method="post" action="<?= h($_intTabBase) ?>&tab=check" class="int-manage-action-form" id="int-delete-all-form">
+                  <input type="hidden" name="action" value="delete_all_runs">
+                  <?= csrf_field() ?>
+                  <label class="int-manage-cb"><input type="checkbox" name="also_run_log"    value="1"> Also delete run log files</label>
+                  <label class="int-manage-cb"><input type="checkbox" name="also_action_log" value="1"> Also delete action log files</label>
+                  <div style="margin-top:8px;">
+                    <label style="display:block;font-size:11px;font-weight:700;color:#dc2626;margin-bottom:4px;">
+                      Type <code>DELETE ALL INTEGRITY RESULTS</code> to confirm:
+                    </label>
+                    <input type="text" name="confirm_text" class="int-manage-confirm-input"
+                           placeholder="DELETE ALL INTEGRITY RESULTS" autocomplete="off">
+                  </div>
+                  <button type="submit" class="btn int-manage-btn-nuke" id="int-delete-all-btn">
+                    Delete all Integrity run results
+                  </button>
+                </form>
+              </div>
+
+            </div>
+          </details>
 
           <!-- Filter bar (result filters only — not scan exclusions) -->
           <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px;">
@@ -3756,6 +3968,30 @@ if ($_intSidebarPath && file_exists($_intSidebarPath)) include $_intSidebarPath;
       xhr2.send();
     });
   }
+
+  // Run selector — navigate to selected run_id
+  var runSelect = document.getElementById('int-run-select');
+  if (runSelect) {
+    runSelect.addEventListener('change', function () {
+      var runId = runSelect.value;
+      if (runId) {
+        window.location.href = '<?= addslashes(h($_intTabBase)) ?>&tab=check&run_id=' + encodeURIComponent(runId);
+      }
+    });
+  }
+
+  // Delete-all form — validate confirmation text before submit
+  var deleteAllForm = document.getElementById('int-delete-all-form');
+  if (deleteAllForm) {
+    deleteAllForm.addEventListener('submit', function (e) {
+      var input = deleteAllForm.querySelector('[name="confirm_text"]');
+      if (!input || input.value.trim() !== 'DELETE ALL INTEGRITY RESULTS') {
+        e.preventDefault();
+        alert('Please type DELETE ALL INTEGRITY RESULTS exactly to confirm.');
+      }
+    });
+  }
+
 })();
 </script>
 </body>
